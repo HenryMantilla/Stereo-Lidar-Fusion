@@ -1,13 +1,13 @@
 import os
 from glob import glob
 
-def get_kitti_paths(data_path, training):
+
+def get_kitti_paths(data_path):
 
     assert os.path.exists(data_path)
-    mode = 'train' if training == True else 'val'
 
     scene_paths = []
-    mode_dir = os.path.join(data_path, mode)
+    mode_dir = os.path.join(data_path)
     scene_date_list = sorted(os.listdir(mode_dir))
     
     for scene_date in scene_date_list:
@@ -21,8 +21,9 @@ def get_kitti_paths(data_path, training):
     return scene_paths
 
 
-def get_kitti_files(scene_paths):
+def get_kitti_files(data_path):
 
+    scene_paths = get_kitti_paths(data_path)
     stereo_files, sparse_files, gt_files = [], [], []
 
     for scene in scene_paths:
@@ -37,6 +38,4 @@ def get_kitti_files(scene_paths):
     assert len(stereo_files) == len(sparse_files) == len(gt_files), \
     "The number of images must be the same."
 
-scene_paths = get_kitti_paths('./Data', True)
-
-get_kitti_files(scene_paths)
+    return stereo_files, sparse_files, gt_files 

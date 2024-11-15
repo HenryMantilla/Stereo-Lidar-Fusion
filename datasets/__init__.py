@@ -1,2 +1,5 @@
-from .kitti import KittiDepthCompletion
-from .utils import *
+from datasets.kitti import KittiDepthCompletion, fetch_dataloader
+
+__datasets__ = {
+    "kitti": KittiDepthCompletion
+}
