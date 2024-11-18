@@ -65,7 +65,7 @@ def crop_fixed_size(image, crop_size):
     return cropped_img
 
 
-def crop_center(image, crop_size):
+def crop_bottom_center(image, crop_size):
 
     if isinstance(image, np.ndarray):
         tensor_img = TF.to_tensor(image)
@@ -77,19 +77,19 @@ def crop_center(image, crop_size):
 
     assert crop_h <= h and crop_w <= w, "Crop size exceeds the image dimensions"
 
-    center_h = h // 2
-    center_w = w // 2
-    top = center_h - (crop_h // 2)
-    left = center_w - (crop_w // 2)
-
+    left = (w - crop_w) // 2  
+    top = h - crop_h  
+    
     cropped_img = TF.crop(tensor_img, top, left, crop_h, crop_w)
 
     return cropped_img
 
 
 def invert_depth(depth):
-
     max_val = depth.max()
     inv_depth = depth - max_val
 
     return inv_depth
+
+def get_valid_mask(input):
+    return (input > 0).detach()

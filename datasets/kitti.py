@@ -35,40 +35,35 @@ class KittiDepthCompletion(data.Dataset):
 
         stereo_normalized, sparse_normalized, gt_normalized = list(map(lambda x: frame_utils.normalize_image(x), [stereo_disp, sparse_disp, gt_disp]))
 
-        if self.training:
-            stereo_crop, sparse_crop, gt_crop = list(map(lambda x: frame_utils.crop_center(x, self.crop_size),
-                                                                    [stereo_normalized, sparse_normalized, gt_normalized]))
+        #if self.training:
+        stereo_crop, sparse_crop, gt_crop = list(map(lambda x: frame_utils.crop_bottom_center(x, self.crop_size),
+                                                                [stereo_normalized, sparse_normalized, gt_normalized]))
         
         stereo, sparse, gt = list(map(lambda x: self.transform(x), [stereo_crop, sparse_crop, gt_crop] ))
         
         return stereo, sparse, gt
     
 
-def fetch_dataloader(args):
+def get_dataloader(args, train):
 
-    if args.dataset == 'kitti':
+    if args.dataset == 'kitti_completion':
         
-        dataset = KittiDepthCompletion(args.data_path, args.crop_size, args.training)
+        dataset = KittiDepthCompletion(args.data_path, args.crop_size, train)
         logger.info(f"Loading {len(dataset)} images from KITTI Depth Completion dataset.")
-
     
-    dataloader = data.DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
-                                num_workers=args.num_workers, pin_memory=True, drop_last=True)
-    
+        dataloader = data.DataLoader(dataset, batch_size=args.batch_size, shuffle=train,
+                                    num_workers=args.num_workers, pin_memory=True, drop_last=True)
 
-    return dataloader
-
-
+    return dataloader, len(dataset)
 
 
 """
 data_path = './Data'
-crop_size = (256, 512)
-training = True
+crop_size = (240, 1216)
+training = False
 kitti_dataset = KittiDepthCompletion(data_path=data_path, crop_size=crop_size, training=training)
 
 stereo, sparse, gt = kitti_dataset[0]
-
 
 import matplotlib
 matplotlib.use('TkAgg')

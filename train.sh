@@ -1,6 +1,6 @@
 #!/bin/bash
 
-DATASET='kitti'
+DATASET='kitti_completion'
 DATA_PATH='Data'
 TRAINING=True
 CROP_SIZE=(240,1216)

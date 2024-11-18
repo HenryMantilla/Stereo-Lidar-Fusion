@@ -1,5 +1,5 @@
-from datasets.kitti import KittiDepthCompletion, fetch_dataloader
+from datasets.kitti import KittiDepthCompletion, get_dataloader
 
 __datasets__ = {
-    "kitti": KittiDepthCompletion
+    "kitti_completion": KittiDepthCompletion
 }
