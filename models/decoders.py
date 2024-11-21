@@ -3,12 +3,12 @@ import torch.nn as nn
 from models.modules import ConvexUpsampling, conv_block
     
 class ConvDecoderWithConvexUp(nn.Module):
-    def __init__(self, in_chans, feature_channels=[512, 256, 128, 64], out_chans=1):
+    def __init__(self, in_chans, feature_channels=[256, 128, 64, 32, 16], out_chans=1):
         super().__init__()
 
         self.blocks = nn.ModuleList()
 
-        for i in len(feature_channels):
+        for i in range(len(feature_channels)):
             fc = feature_channels[i]
             in_ch = in_chans[i]
 
@@ -20,19 +20,23 @@ class ConvDecoderWithConvexUp(nn.Module):
 
             self.blocks.append(block)
 
-        self.final_conv = conv_block(feature_channels[-1], out_chans, 1)
+        self.final_conv = nn.Sequential(
+            ConvexUpsampling(feature_channels[-1], upsample_factor=2),
+            conv_block(feature_channels[-1], out_chans, 1)
+            )
 
     def forward(self, cnn_feat, vit_out):
         
         cnnf_1, cnnf_2, cnnf_3, cnnf_4 = cnn_feat
-        block_1, block_2, block_3, block_4 = self.blocks
+        block_1, block_2, block_3, block_4, block_5 = self.blocks
 
-        x_1 = block_1(torch.cat((cnnf_1, vit_out), dim=1))
-        x_2 = block_2(torch.cat((cnnf_2, x_1), dim=1))
+        x_1 = block_1(vit_out)
+        x_2 = block_2(torch.cat((cnnf_4, x_1), dim=1))
         x_3 = block_3(torch.cat((cnnf_3, x_2), dim=1))
-        x_4 = block_4(torch.cat((cnnf_4, x_3), dim=1))
+        x_4 = block_4(torch.cat((cnnf_2, x_3), dim=1))
+        x_5 = block_5(torch.cat((cnnf_1, x_4), dim=1))
 
-        return self.final_conv(x_4)
+        return self.final_conv(x_5)
 
 
 class ConvDecoder(nn.Module):

@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from timm.models.layers import to_2tuple
+from timm.layers import to_2tuple
 
 
 def tconv_block(in_ch, out_ch, kernel, stride=1, padding=0):
@@ -26,9 +26,11 @@ class ConvexUpsampling(nn.Module):
     def __init__(self, in_chans, upsample_factor=2):
         super().__init__()
 
+        self.upsample_factor = upsample_factor
+
         self.upsampler_conv = nn.Sequential(nn.Conv2d(in_chans, 256, 3, 1, 1),
                                             nn.ReLU(inplace=True),
-                                            nn.Conv2d(256, upsample_factor ** 2 * 9, 1, 1, 0))
+                                            nn.Conv2d(256, self.upsample_factor ** 2 * 9, 1, 1, 0))
 
     def forward(self, x):
 
@@ -47,15 +49,15 @@ class ConvexUpsampling(nn.Module):
 
 
 class ChannelAttention(nn.Module):
-    def __init__(self, in_ch, ratio=16):
+    def __init__(self, in_chans, ratio=16):
         super().__init__()
 
         self.avg_pooling = nn.AdaptiveAvgPool2d(1)
         self.max_pooling = nn.AdaptiveMaxPool2d(1)
 
-        self.net = nn.Sequential(nn.Conv2d(in_ch, in_ch//ratio, 1),
+        self.net = nn.Sequential(nn.Conv2d(in_chans, in_chans//ratio, 1),
                                  nn.ReLU(),
-                                 nn.Conv2d(in_ch//ratio, in_ch, 1))
+                                 nn.Conv2d(in_chans//ratio, in_chans, 1))
         
         self.sigmoid = nn.Sigmoid()
 
@@ -77,6 +79,8 @@ class PatchEmbedding(nn.Module):
 
         self.img_size = img_size
         self.patch_size = patch_size
+
+        print(embed_dim)
         # assert img_size[0] % patch_size[0] == 0 and img_size[1] % patch_size[1] == 0, \
         #     f"img_size {img_size} should be divided by patch_size {patch_size}."
         self.H, self.W = img_size[0] // patch_size[0], img_size[1] // patch_size[1]
@@ -85,21 +89,24 @@ class PatchEmbedding(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
+        print('Embedding_input', x.shape)
         B, C, H, W = x.shape
+        print('Embedding Forward', x.shape)
 
         x = self.proj(x).flatten(2).transpose(1, 2)
         x = self.norm(x)
         H, W = H // self.patch_size[0], W // self.patch_size[1]
 
+        print('Projected embedding', x.shape)
         return x, (H, W)
 
 class Mlp(nn.Module):
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+    def __init__(self, in_features, hidden_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
 
         self.fc1 = nn.Linear(in_features, hidden_features)
         self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.fc2 = nn.Linear(hidden_features, in_features)
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):

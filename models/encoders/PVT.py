@@ -103,7 +103,7 @@ class Block(nn.Module):
 
     def forward(self, x_stereo, x_sparse, H, W):
 
-        x = x + self.drop_path(self.attn(self.norm1(x_stereo), self.norm1(x_sparse), H, W))
+        x = x_sparse + self.drop_path(self.attn(self.norm1(x_stereo), self.norm1(x_sparse), H, W))
         x = x + self.drop_path(self.mlp(self.norm2(x)))
 
         return x
@@ -142,19 +142,9 @@ class PyramidVisionTransformer(nn.Module):
             setattr(self, f"pos_drop{i + 1}", pos_drop)
             setattr(self, f"block{i + 1}", block)
 
-        self.norm = norm_layer(embed_dims[3])
-
-        # cls_token
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dims[3]))
-
-        # classification head
-        self.head = nn.Linear(embed_dims[3], num_classes) if num_classes > 0 else nn.Identity()
-
-        # init weights
         for i in range(num_stages):
             pos_embed = getattr(self, f"pos_embed{i + 1}")
             trunc_normal_(pos_embed, std=.02)
-        trunc_normal_(self.cls_token, std=.02)
         self.apply(self._init_weights)
 
 
@@ -196,14 +186,14 @@ class PyramidVisionTransformer(nn.Module):
             pos_drop = getattr(self, f"pos_drop{i + 1}")
             block = getattr(self, f"block{i + 1}")
 
+            print('Forward transformer Stereo', x_stereo.shape)
+            print('Forward transformer Sparse', x_sparse.shape)
+            
             x_stereo, (H, W) = patch_embed(x_stereo)
-            x_sparse, (H,W) = patch_embed(x_sparse)
+            x_sparse, _ = patch_embed(x_sparse)
 
             if i == self.num_stages - 1:
-                #cls_tokens = self.cls_token.expand(B, -1, -1)
-                #x = torch.cat((cls_tokens, x), dim=1)
                 pos_embed = self._get_pos_embed(pos_embed[:, 1:], patch_embed, H, W)
-                #pos_embed = torch.cat((pos_embed[:, 0:1], pos_embed_), dim=1)
             else:
                 pos_embed = self._get_pos_embed(pos_embed, patch_embed, H, W)
 
@@ -211,18 +201,21 @@ class PyramidVisionTransformer(nn.Module):
             x_sparse = pos_drop(x_sparse + pos_embed)
 
             for blk in block:
-                x = blk(x_stereo, x_sparse, H, W)
+                x_sparse = blk(x_stereo, x_sparse, H, W)
                 
-            if i != self.num_stages - 1:
-                x = x.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
+            x_stereo = x_stereo.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
+            x_sparse = x_sparse.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
 
-        x = self.norm(x)
+            print('Final Stereo', x_stereo.shape)
+            print('Final sparse', x_sparse.shape)
+            print('Stage: ', i)
 
-        return x
+        return x_sparse
 
-    def forward(self, x):
-        x = self.forward_features(x)
+    def forward(self, x_stereo, x_sparse):
+        x_sparse = self.forward_features(x_stereo, x_sparse)
 
-        return x
+        print('Transformer output', x_sparse.shape)
+        return x_sparse
     
 
