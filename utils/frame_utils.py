@@ -37,9 +37,9 @@ def disparity_to_depth(disparity):
     _, width = disparity.shape[:2]
     focal_length = width_to_focal[width]
 
-    disparity = (focal_length * baseline) / (disparity + 1e8)
+    depth = (focal_length * baseline) / (disparity + 1e8)
 
-    return disparity
+    return depth
 
 
 def normalize_image(image):

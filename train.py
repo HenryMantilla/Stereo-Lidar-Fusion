@@ -13,8 +13,7 @@ from tqdm import tqdm
 from loguru import logger
 from datasets import __datasets__, get_dataloader
 from models import __models__
-from utils import get_lr_scheduler, get_optimizer, save_checkpoint, load_checkpoint
-from utils import MetricEvaluator
+from utils import get_lr_scheduler, get_optimizer, save_checkpoint, load_checkpoint, disparity_to_depth, MetricEvaluator
 
 
 parser = argparse.ArgumentParser(description="Stereo-Lidar Fusion for Depth Completion")
@@ -170,7 +169,10 @@ def validate(model, val_loader, metric_evaluator, epoch):
             stereo, sparse, groundtruth = [x.cuda() for x in batch_sample]
             pred = model(stereo, sparse)
 
-            metric_results = metric_evaluator.evaluate_metrics(pred, groundtruth)
+            depth_groundtruth = disparity_to_depth(groundtruth)
+            depth_pred = disparity_to_depth(pred)
+
+            metric_results = metric_evaluator.evaluate_metrics(depth_pred, depth_groundtruth)
 
             batch_size = groundtruth.size(0)
             num_samples += batch_size
@@ -183,7 +185,7 @@ def validate(model, val_loader, metric_evaluator, epoch):
             progress_bar.set_postfix({metric: f"{value:.4f}" for metric, value in avg_metrics.items()})
 
             if batch_idx < 1:
-                log_predictions(pred, groundtruth, stereo, epoch, num_samples=4)
+                log_predictions(depth_pred, depth_groundtruth, stereo, epoch, num_samples=4)
 
     final_metrics = {metric: total / num_samples for metric, total in total_metrics.items()}
 
