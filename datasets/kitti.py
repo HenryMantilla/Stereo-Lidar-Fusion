@@ -55,29 +55,3 @@ def get_dataloader(args, train):
                                     num_workers=args.num_workers, pin_memory=True, drop_last=True)
 
     return dataloader, len(dataset)
-
-
-"""
-data_path = './Data'
-crop_size = (240, 1216)
-training = False
-kitti_dataset = KittiDepthCompletion(data_path=data_path, crop_size=crop_size, training=training)
-
-stereo, sparse, gt = kitti_dataset[0]
-
-import matplotlib
-matplotlib.use('TkAgg')
-import matplotlib.pyplot as plt
-fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-
-axes[0].imshow(stereo.permute(1,2,0), cmap='magma')
-axes[0].set_title('Stereo Depth')
-
-axes[1].imshow(sparse.permute(1,2,0), cmap='magma')
-axes[1].set_title('LiDAR')
-
-axes[2].imshow(gt.permute(1,2,0), cmap='magma')
-axes[2].set_title('GT depth map')
-
-plt.show()
-"""

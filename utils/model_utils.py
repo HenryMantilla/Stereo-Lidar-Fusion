@@ -10,7 +10,7 @@ def save_checkpoint(ckpt_dir, model, optim, scheduler, epoch):
         'epoch': epoch
     }
 
-    ckpt_path = os.path.join(ckpt_dir, '[checkpoint_epoch_{:02d}.ckpt'.format(epoch))
+    ckpt_path = os.path.join(ckpt_dir, 'checkpoint_epoch_{:02d}.ckpt'.format(epoch))
     torch.save(states, ckpt_path)
 
     return ckpt_path
@@ -59,7 +59,7 @@ def get_lr_scheduler(args, optimizer):
 
     lr_schedulers_params = {
         'cosine': {
-            'T_max': 50, 
+            'T_max': args.epochs, 
             'eta_min': 0.001,  
         },
         'cyclic': {

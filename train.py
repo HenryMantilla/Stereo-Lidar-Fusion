@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.backends.cudnn as cudnn
 from torchvision.utils import make_grid
-#import torch.backends.cudnn as cudnn
 
 import os
 import argparse
@@ -20,15 +20,15 @@ parser = argparse.ArgumentParser(description="Stereo-Lidar Fusion for Depth Comp
 parser.add_argument('--model', default='depth_fusion_base', help='Select a model', choices=__models__.keys())
 
 ### Dataset
-parser.add_argument('--dataset', default='kitti_completion', required=True, help='Depth completion dataset name', choices=__datasets__.keys())
+parser.add_argument('--dataset', default='kitti_completion', help='Depth completion dataset name', choices=__datasets__.keys())
 parser.add_argument('--data_path', required=True, help='Dataset path')
-#parser.add_argument('--training', default=True, required=True, help='Training phase or not')
-parser.add_argument('--crop_size', type=tuple,default=(256, 1216), required=True, help='Training crop size')
+parser.add_argument('--crop_size', type=int, nargs='+', default=[256, 1216], help='Training crop size')
 parser.add_argument('--num_workers', type=int, default=4, help='Number of dataloader workers')
 
 ### Model config and hyperparameters
 parser.add_argument('--seed', type=int, default=123, help='Random seed')
-parser.add_argument('--optimizer', type=str, default='adam', required=True, choices=['adam', 'sgd', 'adamw'], help='Optimizer to use')
+parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd', 'adamw'], help='Optimizer to use')
+parser.add_argument('--scheduler', type=str, default='cosine', choices=['cosine', 'cyclic'], help='Lr scheduler to use')
 parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay')
 parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
 parser.add_argument('--batch_size', type=int, default=16, help='Training batch size')
@@ -48,8 +48,8 @@ os.makedirs(args.ckpt_dir, exist_ok=True)
 torch.manual_seed(args.seed)
 torch.cuda.manual_seed(args.seed)
 
-#cudnn.benchmark = True
-#cudn.deterministic = True
+cudnn.benchmark = False
+cudnn.deterministic = True
 
 wandb.init(
     project='Depth-Completion',
