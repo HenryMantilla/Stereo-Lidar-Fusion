@@ -4,7 +4,7 @@ python train.py \
   --model depth_fusion_base \
   --dataset kitti_completion \
   --data_path data \
-  --crop_size 240 1216 \
+  --crop_size 256 1242 \
   --num_workers 4 \
   --seed 123 \
   --optimizer adam \

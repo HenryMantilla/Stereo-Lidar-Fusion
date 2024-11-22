@@ -23,6 +23,25 @@ def depth_to_disparity(depth): #Generalize for other datasets in case
     return disparity
 
 
+def disparity_to_depth(disparity):
+
+    baseline = 0.54
+    width_to_focal = dict()
+
+    width_to_focal[1242] = 721.5377
+    width_to_focal[1241] = 718.8560
+    width_to_focal[1224] = 707.0493
+    width_to_focal[1226] = 708.2046
+    width_to_focal[1238] = 718.3351
+
+    _, width = disparity.shape[:2]
+    focal_length = width_to_focal[width]
+
+    disparity = (focal_length * baseline) / (disparity + 1e8)
+
+    return disparity
+
+
 def normalize_image(image):
 
     min_val = image.min()
