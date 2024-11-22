@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torchvision.utils import make_grid
 #import torch.backends.cudnn as cudnn
 
 import os
@@ -23,7 +24,7 @@ parser.add_argument('--model', default='depth_fusion_base', help='Select a model
 parser.add_argument('--dataset', default='kitti_completion', required=True, help='Depth completion dataset name', choices=__datasets__.keys())
 parser.add_argument('--data_path', required=True, help='Dataset path')
 #parser.add_argument('--training', default=True, required=True, help='Training phase or not')
-parser.add_argument('--crop_size', type=tuple,default=(240, 1216), required=True, help='Training crop size')
+parser.add_argument('--crop_size', type=tuple,default=(256, 1216), required=True, help='Training crop size')
 parser.add_argument('--num_workers', type=int, default=4, help='Number of dataloader workers')
 
 ### Model config and hyperparameters
@@ -50,6 +51,11 @@ torch.cuda.manual_seed(args.seed)
 
 #cudnn.benchmark = True
 #cudn.deterministic = True
+
+wandb.init(
+    project='Depth-Completion',
+    config=args
+)
 
 def main(args):
 
@@ -120,16 +126,23 @@ def main(args):
             epoch_loss += loss.item()
             progress_bar.set_postfix(loss=loss.item())
 
+            wandb.log({
+                "batch_loss": loss.item(),
+                "learning_rate": optimizer.param_groups[0]['lr']
+            })
+
             if isinstance(lr_scheduler, optim.lr_scheduler.CyclicLR):
                 lr_scheduler.step()
 
         if isinstance(lr_scheduler, optim.lr_scheduler.CosineAnnealingLR):
             lr_scheduler.step()
 
-        print(f"Epoch {epoch_idx+1} Loss: {epoch_loss / len(train_dataloader)}")
+        avg_epoch_loss = epoch_loss / len(train_dataloader)
+        wandb.log({"Epoch Loss": avg_epoch_loss})
+        print(f"Epoch {epoch_idx+1} Loss: {avg_epoch_loss}")
 
         if (epoch_idx + 1) % args.val_freq == 0:
-            metrics_eval = validate(model, val_dataloader, metric_evaluator)
+            metrics_eval = validate(model, val_dataloader, metric_evaluator, epoch_idx+1)
             current_rmse = metrics_eval.get('rmse_metric', float('inf'))
 
             if current_rmse < best_rmse:
@@ -143,7 +156,7 @@ def main(args):
                 print(f"{metric:<15}: {value:.4f}")
 
 
-def validate(model, val_loader, metric_evaluator):
+def validate(model, val_loader, metric_evaluator, epoch):
 
     model.eval()
     total_metrics = {metric: 0.0 for metric in metric_evaluator.metrics}
@@ -152,7 +165,7 @@ def validate(model, val_loader, metric_evaluator):
     progress_bar = tqdm(val_loader, total=len(val_loader), desc=f"Validation")
     
     with torch.no_grad():
-        for _, batch_sample in progress_bar:
+        for batch_idx, batch_sample in progress_bar:
 
             stereo, sparse, groundtruth = [x.cuda() for x in batch_sample]
             pred = model(stereo, sparse)
@@ -169,9 +182,34 @@ def validate(model, val_loader, metric_evaluator):
 
             progress_bar.set_postfix({metric: f"{value:.4f}" for metric, value in avg_metrics.items()})
 
+            if batch_idx < 1:
+                log_predictions(pred, groundtruth, stereo, epoch, num_samples=4)
+
     final_metrics = {metric: total / num_samples for metric, total in total_metrics.items()}
 
+    wandb.log(final_metrics, step=epoch)
     return final_metrics
+
+
+def log_predictions(pred, groundtruth, stereo, epoch, num_samples):
+
+    pred_samples = pred[:num_samples]
+    gt_samples = groundtruth[:num_samples]
+    stereo_samples = stereo[:num_samples]
+
+    predictions_grid = make_grid(pred_samples, nrow=num_samples, normalize=True, scale_each=True)
+    gt_grid = make_grid(gt_samples, nrow=num_samples, normalize=True, scale_each=True)
+    stereo_grid = make_grid(stereo_samples, nrow=num_samples, normalize=True, scale_each=True)
+
+    wandb.log({
+        "Predicted Depth": wandb.Image(predictions_grid, caption="Predicted Depth"),
+        "Groundtruth Depth": wandb.Image(gt_grid, caption="Groundtruth Depth"),
+        "Stereo Inputs": wandb.Image(stereo_grid, caption="Stereo Inputs")
+    }, step=epoch)
+
+    
+
+
 
 
 

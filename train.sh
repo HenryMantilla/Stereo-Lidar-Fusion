@@ -1,11 +1,19 @@
 #!/bin/bash
 
-DATASET='kitti_completion'
-DATA_PATH='Data'
-TRAINING=True
-CROP_SIZE=(240,1216)
-EPOCHS=50
-CKPT_DIR='logs'
+python train.py \
+  --model depth_fusion_base \
+  --dataset kitti_completion \
+  --data_path data \
+  --crop_size 240 1216 \
+  --num_workers 4 \
+  --seed 123 \
+  --optimizer adam \
+  --weight_decay 0.0 \
+  --lr 1e-4 \
+  --batch_size 16 \
+  --epochs 100 \
+  --ckpt_dir ./checkpoints \
+  --save_ckpt_freq 10 \
+  --val_freq 5 \
+  "$@"
 
-python train.py --dataset "$DATASET" --data_path="$DATA_PATH" --training="$TRAINING" \
-    --crop_size "$CROP_SIZE" --epochs "$EPOCHS" --ckpt_dir "$CKPT_DIR"
