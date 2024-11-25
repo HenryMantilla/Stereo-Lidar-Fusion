@@ -72,7 +72,7 @@ def main(args):
     criterion_smooth_l1 = nn.SmoothL1Loss()
     criterion_l2 = nn.MSELoss(reduction='mean')
 
-    metrics = ["mae_metric", "imae_metric", "rmse_metric", "irmse_metric", "d1_metric"]
+    metrics = ["mae_metric", "imae_metric", "rmse_metric", "irmse_metric"]
     metric_evaluator = MetricEvaluator(metrics)
 
     #best_epoch = 0

@@ -50,10 +50,12 @@ def irmse_metric(pred, groundtruth):
     return irmse
 
 ### d1 is calculated on disparity
+"""
 def d1_metric(pred, groundtruth):
     
     mae = torch.abs(pred-groundtruth)
     d1_mask = (mae > 3) & (mae / groundtruth.abs() > 0.05)
 
-    return torch.mean(d1_mask.float())
+    return d1_mask.float()
+"""
 
