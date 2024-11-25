@@ -55,12 +55,3 @@ def get_dataloader(args, train):
                                     num_workers=args.num_workers, pin_memory=True, drop_last=True)
 
     return dataloader, len(dataset)
-
-
-
-data_path = "Data"  
-crop_size = (256, 256)             
-batch_size = 4
-dataset = KittiDepthCompletion(data_path, crop_size, training=True)
-
-print(f"Number of samples in the dataset: {len(dataset)}")
