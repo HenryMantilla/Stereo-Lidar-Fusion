@@ -27,7 +27,7 @@ def get_kitti_files(data_path):
     stereo_files, sparse_files, gt_files = [], [], []
 
     for scene in scene_paths:
-        stereo_dir = os.path.join(scene, 'image_02', 'data') #Temporal, remeber change to stereo disparity
+        stereo_dir = os.path.join(scene, 'stereo') 
         sparse_dir = os.path.join(scene, 'proj_depth', 'velodyne_raw', 'image_02')
         gt_dir = os.path.join(scene, 'proj_depth', 'groundtruth', 'image_02')
 

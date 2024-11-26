@@ -11,7 +11,7 @@ class DepthFusion(nn.Module):
         super().__init__()
 
         self.num_stages = 3
-        self.convnext_encoder = timm.create_model('convnextv2_atto.fcmae', convnext_pretrained)
+        self.convnext_encoder = timm.create_model('convnextv2_tiny.fcmae', convnext_pretrained)
 
         for i in range(4):
             setattr(self, f'channel_attn_{i}', ChannelAttention(in_chans=in_chans_transformer[i], ratio=8))
@@ -49,7 +49,7 @@ class DepthFusion(nn.Module):
 
         return decoder_out
         
-
+"""
 batch_size = 2
 height = 256
 width = 1216
@@ -61,4 +61,5 @@ in_chans = [40,80,160,320] #[96,192,384,768]
 model = DepthFusion(in_chans_transformer=in_chans, convnext_pretrained=True)
 
 output = model(stereo, sparse)
-print('We did it',output.shape)
+print(output.shape)
+"""
