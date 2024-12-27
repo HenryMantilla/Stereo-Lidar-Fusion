@@ -13,13 +13,17 @@ def tconv_block(in_ch, out_ch, kernel, stride=1, padding=0):
     
     return tconv_blk
 
-def conv_block(in_ch,out_ch, kernel, stride=1, padding=0):
+class ConvBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
 
-    conv_blk = nn.Sequential(nn.Conv2d(in_ch, out_ch, kernel, stride, padding),
-                              nn.BatchNorm2d(out_ch),
-                              nn.ReLU(inplace=True))
-    
-    return conv_blk
+    def forward(self, x):
+        return self.conv(x)
 
 
 class ConvexUpsampling(nn.Module):
@@ -28,9 +32,9 @@ class ConvexUpsampling(nn.Module):
 
         self.upsample_factor = upsample_factor
 
-        self.upsampler_conv = nn.Sequential(nn.Conv2d(in_chans, 256, 3, 1, 1),
+        self.upsampler_conv = nn.Sequential(nn.Conv2d(in_chans, 128, 3, 1, 1),
                                             nn.ReLU(inplace=True),
-                                            nn.Conv2d(256, self.upsample_factor ** 2 * 9, 1, 1, 0))
+                                            nn.Conv2d(128, self.upsample_factor ** 2 * 9, 1, 1, 0))
 
     def forward(self, x):
 
@@ -68,8 +72,41 @@ class ChannelAttention(nn.Module):
 
         ch_attn = max_pool + avg_pool
 
-        return self.sigmoid(ch_attn)
+        return self.sigmoid(ch_attn) 
 
+
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super().__init__()
+
+        self.conv = nn.Conv2d(2, 1, kernel_size, padding=kernel_size//2)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+
+        x = torch.cat([avg_out, max_out], dim=1)
+        x = self.sigmoid(self.conv(x))
+
+        return x
+
+
+class CBAM(nn.Module):
+    def __init__(self, input_channels, reduction=16, kernel_size=7):
+        super().__init__()
+        self.channel_attention = ChannelAttention(input_channels, ratio=reduction)
+        self.spatial_attention = SpatialAttention(kernel_size=kernel_size)
+
+    def forward(self, x):
+        ca = self.channel_attention(x)
+        x = x * ca
+
+        sa = self.spatial_attention(x)
+        x = x * sa
+
+        return x
 
 class PatchEmbedding(nn.Module):  
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
@@ -80,7 +117,7 @@ class PatchEmbedding(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
 
-        print(embed_dim)
+        #print(embed_dim)
         # assert img_size[0] % patch_size[0] == 0 and img_size[1] % patch_size[1] == 0, \
         #     f"img_size {img_size} should be divided by patch_size {patch_size}."
         self.H, self.W = img_size[0] // patch_size[0], img_size[1] // patch_size[1]
@@ -89,15 +126,15 @@ class PatchEmbedding(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
-        print('Embedding_input', x.shape)
+        #print('Embedding_input', x.shape)
         B, C, H, W = x.shape
-        print('Embedding Forward', x.shape)
+        #print('Embedding Forward', x.shape)
 
         x = self.proj(x).flatten(2).transpose(1, 2)
         x = self.norm(x)
         H, W = H // self.patch_size[0], W // self.patch_size[1]
 
-        print('Projected embedding', x.shape)
+        #print('Projected embedding', x.shape)
         return x, (H, W)
 
 class Mlp(nn.Module):
@@ -119,45 +156,45 @@ class Mlp(nn.Module):
 
 
 class SpatialReductionAttention(nn.Module):
-        def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., sr_ratio=1):
-            super().__init__()
-            assert dim % num_heads == 0, f"dim {dim} should be divided by num_heads {num_heads}."
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., sr_ratio=1):
+        super().__init__()
+        assert dim % num_heads == 0, f"dim {dim} should be divided by num_heads {num_heads}."
 
-            self.dim = dim
-            self.num_heads = num_heads
-            head_dim = dim // num_heads
-            self.scale = qk_scale or head_dim ** -0.5
+        self.dim = dim
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim ** -0.5
 
-            self.q = nn.Linear(dim, dim, bias=qkv_bias)
-            self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
-            self.attn_drop = nn.Dropout(attn_drop)
-            self.proj = nn.Linear(dim, dim)
-            self.proj_drop = nn.Dropout(proj_drop)
+        self.q = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
 
-            self.sr_ratio = sr_ratio
-            if sr_ratio > 1:
-                self.sr = nn.Conv2d(dim, dim, kernel_size=sr_ratio, stride=sr_ratio)
-                self.norm = nn.LayerNorm(dim)
+        self.sr_ratio = sr_ratio
+        if sr_ratio > 1:
+            self.sr = nn.Conv2d(dim, dim, kernel_size=sr_ratio, stride=sr_ratio)
+            self.norm = nn.LayerNorm(dim)
 
-        def forward(self, x_stereo, x_sparse, H, W):
-            B, N, C = x_sparse.shape
-            q = self.q(x_sparse).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+    def forward(self, x_stereo, x_sparse, H, W):
+        B, N, C = x_sparse.shape
+        q = self.q(x_sparse).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
 
-            if self.sr_ratio > 1:
-                x_ = x_stereo.permute(0, 2, 1).reshape(B, C, H, W)
-                x_ = self.sr(x_).reshape(B, C, -1).permute(0, 2, 1)
-                x_ = self.norm(x_)
-                kv = self.kv(x_).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-            else:
-                kv = self.kv(x_stereo).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-            k, v = kv[0], kv[1]
+        if self.sr_ratio > 1:
+            x_ = x_stereo.permute(0, 2, 1).reshape(B, C, H, W)
+            x_ = self.sr(x_).reshape(B, C, -1).permute(0, 2, 1)
+            x_ = self.norm(x_)
+            kv = self.kv(x_).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        else:
+            kv = self.kv(x_stereo).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        k, v = kv[0], kv[1]
 
-            attn = (q @ k.transpose(-2, -1)) * self.scale
-            attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn)
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
 
-            x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-            x = self.proj(x)
-            x = self.proj_drop(x)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
 
-            return x
+        return x

@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from models.modules import ConvexUpsampling, conv_block
+from models.modules import ConvexUpsampling, CBAM, conv_block
     
 class ConvDecoderWithConvexUp(nn.Module):
     def __init__(self, in_chans, feature_channels=[256, 128, 64, 32, 16], out_chans=1):
@@ -15,14 +15,15 @@ class ConvDecoderWithConvexUp(nn.Module):
             block = nn.Sequential(
                 ConvexUpsampling(in_ch, upsample_factor=2),
                 conv_block(in_ch, fc, 3, 1, 1),
-                #conv_block(fc, fc, 3, 1, 1)
+                CBAM(fc)
             )
 
             self.blocks.append(block)
 
         self.final_conv = nn.Sequential(
             ConvexUpsampling(feature_channels[-1], upsample_factor=2),
-            conv_block(feature_channels[-1], out_chans, 1)
+            conv_block(feature_channels[-1], out_chans, 1),
+            nn.ReLU(),
             )
 
     def forward(self, cnn_feat, vit_out):
@@ -49,7 +50,7 @@ class ConvDecoder(nn.Module):
             nn.Sequential(
                 nn.ConvTranspose2d(in_ch if i == 0 else in_ch[i-1], ch, kernel, stride, padding, out_padding),
                 nn.BatchNorm2d(ch),
-                nn.ReLu(inplace=True)
+                nn.ReLU(inplace=True)
             ) for i, ch in enumerate(out_features)
         ])
 

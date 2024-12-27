@@ -3,8 +3,13 @@ import torch
 import torch.optim as optim
 
 def save_checkpoint(ckpt_dir, model, optim, scheduler, epoch):
+
+    if hasattr(model, 'module'):
+        model_state_dict = model.module.state_dict()
+    else:
+        model_state_dict = model.state_dict()
     states = {
-        'model': model.state_dict(),
+        'model': model_state_dict,
         'optim': optim.state_dict(),
         'scheduler': scheduler.state_dict(),
         'epoch': epoch
@@ -18,8 +23,15 @@ def save_checkpoint(ckpt_dir, model, optim, scheduler, epoch):
 
 def load_checkpoint(model, optimizer, scheduler, ckpt_path, weights_only):
 
+    if not ckpt_path or not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint not found at {ckpt_path}")
+    
     checkpoint = torch.load(ckpt_path, weights_only)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    
+    if hasattr(model, 'module'):
+        model.module.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        model.load_state_dict(checkpoint['model_state_dict'])
 
     if not weights_only:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -50,21 +62,26 @@ def get_optimizer(args, model):
 
 def get_lr_scheduler(args, optimizer):
     lr_schedulers = {
+        'step': optim.lr_scheduler.StepLR,
         'cosine': optim.lr_scheduler.CosineAnnealingLR, #t_max, eta_min
         'cyclic': optim.lr_scheduler.CyclicLR, #base_lr, max_lr, step_size_up, mode
     }
 
-    if args.optimizer not in lr_schedulers:
-        raise ValueError(f"Unknown optimizer {args.optimizer}")
+    if args.scheduler not in lr_schedulers:
+        raise ValueError(f"Unknown optimizer scheduler {args.scheduler}")
 
     lr_schedulers_params = {
+        'step': {
+            'step_size': 25,
+            'gamma': 0.1
+        },
         'cosine': {
             'T_max': args.epochs, 
-            'eta_min': 0.001,  
+            'eta_min': 1e-6,  
         },
         'cyclic': {
-            'base_lr': 0.001, 
-            'max_lr': 0.01,  
+            'base_lr': 0.0001, 
+            'max_lr': 0.001,  
             'step_size_up': 10,  
             'mode': 'triangular', 
         },

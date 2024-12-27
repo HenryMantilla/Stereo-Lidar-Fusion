@@ -1,6 +1,11 @@
 Data/
-/logs/
-/checkpoints/
+dcgm/
+logs_sbatch/
+checkpoints/
+wandb/
+*.slurm
+
+kitti15.pth
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
