@@ -1,11 +1,7 @@
 import os
-import requests
 
 import torch
 import torch.optim as optim
-
-from tqdm import tqdm
-from loguru import logger
 
 def save_checkpoint(ckpt_dir, model, optim, scheduler, epoch):
 
@@ -98,42 +94,3 @@ def get_lr_scheduler(args, optimizer):
     lr_scheduler = scheduler(optimizer, **scheduler_params)
 
     return lr_scheduler
-
-
-def download_sam_checkpoint(model_type, save_folder):
-
-    checkpoints = {'vit_b' : 'https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth',
-                   'vit_l' : 'https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth',
-                   'vit_h' : 'https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth'}
-    
-    checkpoint_url = checkpoints[model_type]
-    
-    try: 
-        logger.info(f"Downloading SAM checkpoint for {model_type}")
-
-        os.makedirs(save_folder, exist_ok=True)
-        file_name = os.path.basename(checkpoint_url)
-        save_path = os.path.join(save_folder, file_name)
-
-        response = requests.get(checkpoint_url, stream=True)
-        response.raise_for_status()
-
-        total_size = int(response.headers.get('content-length', 0))
-
-        with open(save_path, "wb") as file, tqdm(
-            desc=model_type,
-            total=total_size,
-            unit='B',
-            unit_scale=True,
-            unit_divisor=1024,
-        ) as bar:
-            for chunk in response.iter_content(chunk_size=8192):
-                file.write(chunk)
-                bar.update(len(chunk))
-        logger.info(f"SAM checkpoint successfully and save to {save_path}.")
-        
-        print(save_path)
-        return save_path
-    
-    except Exception as e:
-        logger.info(f"Failed to download the model: {e}")

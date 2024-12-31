@@ -4,12 +4,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from utils.frame_utils import resize_image
+from utils.model_utils import download_sam_checkpoint
 
 from models.modules import CBAM, ConvBlock
 from models.encoders.SwinV2 import SwinTransformerV2
 from models.dyspn import Dynamic_deformablev2
 from models.segment_anything import sam_model_registry
-#from models.segment_anything.modeling.sam import Sam, ImageEncoderViT, PromptEncoder, MaskDecoder
 
 class DepthFusionSAM(nn.Module):
     def __init__(self, convnext_pretrained):
