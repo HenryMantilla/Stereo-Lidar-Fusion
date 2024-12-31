@@ -1,6 +1,6 @@
-import torch.nn as nn
-import torch
 import timm
+import torch
+import torch.nn as nn
 
 from models.encoders.PVT import PvtFamily
 from models.modules import CBAM, ConvBlock

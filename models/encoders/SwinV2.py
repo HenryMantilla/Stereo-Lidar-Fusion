@@ -574,7 +574,7 @@ class SwinTransformerV2(nn.Module):
                                pretrained_window_size=pretrained_window_sizes[i_layer])
             self.layers.append(layer)
 
-            reduce_ch = nn.Conv2d(in_ch[i_layer],embed_dim* 2 ** i_layer, kernel_size=3, padding=1)
+            reduce_ch = nn.Conv2d(in_ch[i_layer], embed_dim* 2 ** i_layer, kernel_size=3, padding=1)
             setattr(self, f"conv_reduce{i_layer + 1}", reduce_ch)
 
         self.norm = norm_layer(self.num_features)

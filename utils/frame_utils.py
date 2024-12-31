@@ -1,4 +1,4 @@
-import random
+import cv2
 import numpy as np
 import torch
 import torchvision.transforms.functional as TF
@@ -94,6 +94,8 @@ def read_depth(image_path):
     
     return np.expand_dims(depth, axis=-1)
 
+def resize_image(image, target_size=(1024, 1024)):
+    return cv2.resize(image, target_size, interpolation=cv2.INTER_LINEAR)
 
 def crop_fixed_size(image, crop_size):
 
@@ -105,23 +107,6 @@ def crop_fixed_size(image, crop_size):
     cropped_img = image[start_y:start_y + crop_H, start_x:start_x + crop_W]
 
     return cropped_img
-
-"""
-def crop_random(image, crop_size):
-
-    H, W = image.shape[:2]
-    crop_H, crop_W = crop_size
-
-    if crop_H > H or crop_W > W:
-        raise ValueError(f"Crop size {crop_size} exceeds image dimensions {H, W}.")
-
-    start_y = random.randint(0, H - crop_H)
-    start_x = random.randint(0, W - crop_W)
-
-    cropped_img = image[start_y:start_y + crop_H, start_x:start_x + crop_W]
-
-    return cropped_img
-"""
 
 def crop_bottom_center(image, crop_size):
 

@@ -3,6 +3,7 @@ dcgm/
 logs_sbatch/
 checkpoints/
 wandb/
+sam_checkpoints/
 *.slurm
 
 kitti15.pth
