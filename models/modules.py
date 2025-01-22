@@ -19,11 +19,14 @@ class ConvBlock(nn.Module):
         self.conv = nn.Sequential(
             nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
+            nn.GELU()
+            #nn.ReLU(inplace=True),
         )
 
     def forward(self, x):
-        return self.conv(x)
+
+        x = self.conv(x)  
+        return x
 
 
 class ConvexUpsampling(nn.Module):
@@ -96,15 +99,60 @@ class SpatialAttention(nn.Module):
 class CBAM(nn.Module):
     def __init__(self, input_channels, reduction=16, kernel_size=7):
         super().__init__()
+        
+        self.conv_blk = nn.Sequential(
+            nn.Conv2d(input_channels, input_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(input_channels),
+            nn.GELU(),
+            nn.Conv2d(input_channels, input_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(input_channels)
+
+        )
+
         self.channel_attention = ChannelAttention(input_channels, ratio=reduction)
         self.spatial_attention = SpatialAttention(kernel_size=kernel_size)
+        self.gelu = nn.GELU()
 
     def forward(self, x):
+
+        residual = x
+
+        x = self.conv_blk(x)
         ca = self.channel_attention(x)
         x = x * ca
 
         sa = self.spatial_attention(x)
         x = x * sa
+
+        x += residual
+
+        return self.gelu(x)
+    
+class ConvMixer(nn.Module):
+    def __init__(self, in_channels, kernel_size, depth, groups=1):
+        super().__init__()
+
+        self.mixer_layers = nn.ModuleList([
+            nn.ModuleList([
+                nn.Sequential(  
+                    nn.Conv2d(in_channels, in_channels, kernel_size, padding=(kernel_size - 1) // 2, groups=groups),
+                    nn.GELU(),
+                    nn.BatchNorm2d(in_channels)
+                ),
+                nn.Sequential( 
+                    nn.Conv2d(in_channels, in_channels, kernel_size=1),
+                    nn.GELU(),
+                    nn.BatchNorm2d(in_channels)
+                )
+            ]) for _ in range(depth)
+        ])
+
+    def forward(self, x):
+
+        for depthwise_block, pointwise_block in self.mixer_layers:
+            residual = x 
+            x = depthwise_block(x)  
+            x = pointwise_block(x) + residual 
 
         return x
 

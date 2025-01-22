@@ -53,5 +53,4 @@ def get_kitti_files(data_path):
     rgb_files = [rgb_files[i] for i in selected_indices]
     """
     
-    
     return rgb_files, stereo_files, sparse_files, gt_files 

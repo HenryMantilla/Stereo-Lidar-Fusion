@@ -19,15 +19,15 @@ torchrun --nnodes=1 --nproc_per_node=2 --node_rank=0 --master_addr=${master_ip} 
   --model depth_fusion_pvt \
   --dataset kitti_completion \
   --data_path Data \
-  --crop_size 256 768 \
-  --num_workers 6 \
+  --crop_size 256 1216 \
+  --num_workers 4 \
   --seed 123 \
   --optimizer adamw \
-  --scheduler cosine \
-  --weight_decay 1e-5 \
+  --scheduler multi_step \
+  --weight_decay 1e-2 \
   --lr 1e-3 \
   --batch_size 4 \
-  --epochs 100 \
-  --ckpt_dir ./checkpoints/crop_256x768_lr_1e-3_adamW_pvt \
-  --save_ckpt_freq 5 \
-  --val_freq 5 \
+  --epochs 80 \
+  --ckpt_dir ./checkpoints/crop_256x1216_lr_1e-3_adamW_tests \
+  --save_ckpt_freq 4 \
+  --val_freq 4 \

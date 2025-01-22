@@ -1,11 +1,10 @@
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 
+from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torchvision.utils import make_grid
 
@@ -13,7 +12,6 @@ import os
 import argparse
 import numpy as np
 import wandb
-import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 
 from tqdm import tqdm
@@ -36,7 +34,7 @@ def parse_args():
     ### Model config and hyperparameters
     parser.add_argument('--seed', type=int, default=123, help='Random seed')
     parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd', 'adamw'], help='Optimizer to use')
-    parser.add_argument('--scheduler', type=str, default='cosine', choices=['step', 'cosine', 'cyclic'], help='Lr scheduler to use')
+    parser.add_argument('--scheduler', type=str, default='cosine', choices=['multi_step', 'cosine', 'cyclic'], help='Lr scheduler to use')
     parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--batch_size', type=int, default=16, help='Training batch size')
@@ -76,25 +74,33 @@ def log_predictions(rank, groundtruth, stereo, init_pred, final_pred, confidence
     init_samples = init_pred[:num_samples].detach().cpu()
     final_samples = final_pred[:num_samples].detach().cpu()
     confidence_samples = confidence[:num_samples].detach().cpu()
+    #dense_samples = dense_lidar[:num_samples].detach().cpu()
+    #depth_convnext_samples = depth_convnext[:num_samples].detach().cpu()
 
     gt_samples = apply_colormap(gt_samples, colormap='magma')
     stereo_samples = apply_colormap(stereo_samples, colormap='magma')
     init_samples = apply_colormap(init_samples, colormap='magma')
     final_samples = apply_colormap(final_samples, colormap='magma')
     confidence_samples = apply_colormap(confidence_samples, colormap='magma')
+    #dense_samples = apply_colormap(dense_samples, colormap='magma')
+    #depth_convnext_samples = apply_colormap(depth_convnext_samples, colormap='magma')
 
     gt_grid = make_grid(gt_samples, nrow=num_samples, normalize=False, scale_each=False)
     stereo_grid = make_grid(stereo_samples, nrow=num_samples, normalize=False, scale_each=False)
-    init_grid = make_grid(init_samples, nrow=num_samples, normalize=True, scale_each=True)
-    final_grid = make_grid(final_samples, nrow=num_samples, normalize=True, scale_each=True)
-    confidence_grid = make_grid(confidence_samples, nrow=num_samples, normalize=True, scale_each=True)
+    init_grid = make_grid(init_samples, nrow=num_samples, normalize=False, scale_each=False)
+    final_grid = make_grid(final_samples, nrow=num_samples, normalize=False, scale_each=False)
+    confidence_grid = make_grid(confidence_samples, nrow=num_samples, normalize=False, scale_each=False)
+    #dense_grid = make_grid(dense_samples, nrow=num_samples, normalize=False, scale_each=False)
+    #depth_convnext_grid = make_grid(depth_convnext_samples, nrow=num_samples, normalize=False, scale_each=False)
 
     wandb.log({
         "Groundtruth Depth": wandb.Image(gt_grid, caption=caption),
         "Stereo Inputs": wandb.Image(stereo_grid, caption=caption),
-        "CNN pred": wandb.Image(init_grid, caption=caption),
-        "Transformer pred": wandb.Image(final_grid, caption=caption),
-        "Confidence": wandb.Image(confidence_grid, caption=caption)
+        "Init pred": wandb.Image(init_grid, caption=caption),
+        "Final pred": wandb.Image(final_grid, caption=caption),
+        "Confidence": wandb.Image(confidence_grid, caption=caption),
+        #"First Refinement": wandb.Image(dense_grid, caption=caption),
+        #"Depth Convnext": wandb.Image(depth_convnext_grid, caption=caption)
     })
 
 def apply_colormap(image_tensor, colormap='plasma'):
@@ -121,26 +127,6 @@ def input_padding(x, target_width=1280):
     x_padded = F.pad(x, (0, pad_w, 0, pad_h))  
 
     return x_padded
-
-def freeze_refinement(fusion_model, module, freeze=True):
-
-    model = fusion_model.module if isinstance(fusion_model, torch.nn.parallel.DistributedDataParallel) else fusion_model
-
-    for name, param in model.named_parameters():
-        print(f"{name}: requires_grad={param.requires_grad}")
-        if module in name:
-            param.requires_grad = not freeze
-        else:
-            param.requires_grad = True
-
-def update_optimizer(optimizer, model, lr):
-    params = filter(lambda p: p.requires_grad, model.parameters())
-    optimizer_defaults = optimizer.defaults.copy()
-    optimizer_defaults['lr'] = lr
-
-    new_optimizer = type(optimizer)(params, **optimizer_defaults)
-
-    return new_optimizer
 
 
 def edge_aware_smoothness_per_pixel(rgb, depth):
@@ -174,31 +160,43 @@ def edge_aware_smoothness_per_pixel(rgb, depth):
     return torch.mean(smoothness_x) + torch.mean(smoothness_y)
 
 
-def compute_depth_losses(predicted_depths, ground_truth_depth, args):
-
-    l1_losses = []
-    l2_losses = []
+def l1l2_loss(predictions, ground_truth, gamma):
+    """
+    Computes the custom loss described in the equation using PyTorch's built-in loss functions.
     
-    for pred in predicted_depths:
-
-        if args.model == 'depth_fusion_swin':
-            pred = pred[:, :, :256, :1216]
-        valid_mask = (ground_truth_depth > 1e-8)
-
-        pred = pred[valid_mask]
-        gt = ground_truth_depth[valid_mask]
-        
-        l1_loss = F.l1_loss(pred, gt, reduction='mean')  
-        l2_loss = F.mse_loss(pred, gt, reduction='mean') 
-        
-        l1_losses.append(l1_loss)
-        l2_losses.append(l2_loss)
+    Args:
+        predictions (list of torch.Tensor): List of predicted depth maps [D^2, D^3, ..., D^N].
+        ground_truth (torch.Tensor): Ground truth depth map (D_gt) with shape [B, H, W].
+        gamma (float): Exponential weight factor.
     
-    mean_l1_loss = torch.mean(torch.stack(l1_losses))
-    mean_l2_loss = torch.mean(torch.stack(l2_losses))
+    Returns:
+        torch.Tensor: The computed loss value.
+    """
+    # Loss functions
+    l1_loss_fn = nn.L1Loss(reduction='mean')
+    mse_loss_fn = nn.MSELoss(reduction='mean')
     
-    result = mean_l1_loss.item() + mean_l2_loss.item()
-    return result
+    # Create mask for valid ground truth values (D_gt > 0)
+    mask = ground_truth > 0
+
+    total_loss = 0.0
+    N = len(predictions) + 1  # Number of predictions including D^2 ... D^N
+
+    # Loop over predictions (D^2 to D^N)
+    for i, D_hat in enumerate(predictions, start=2):
+        # Apply the mask
+        valid_pred = D_hat[mask]
+        valid_gt = ground_truth[mask]
+
+        # Compute weighted L1 and L2 losses
+        weight = gamma ** (N - i)
+        l1_loss = l1_loss_fn(valid_pred, valid_gt)
+        l2_loss = mse_loss_fn(valid_pred, valid_gt)  # MSE is equivalent to L2 loss
+
+        # Combine losses for this prediction
+        total_loss += weight * (l1_loss + l2_loss)
+
+    return total_loss
 
 
 def train(args):
@@ -216,7 +214,10 @@ def train(args):
         wandb.init(
             project='Depth-Completion',
             name=f'Fusion_{args.crop_size}_{args.batch_size}_{args.lr}_{args.epochs}',
-            config=args
+            config=args,
+            mode='online'
+            #id='vdgozqfe',
+            #resume="allow"
         )
     else:
         os.environ["WANDB_MODE"] = "offline"
@@ -230,12 +231,21 @@ def train(args):
         model = __models__[args.model](convnext_pretrained=True)
 
     model.to(rank)
-    model = DDP(model, device_ids=[rank], find_unused_parameters=True, gradient_as_bucket_view=True)
+    model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
-    #freeze_refinement(model, 'refinement', True)
+    #for name, param in model.named_parameters():
+        #if name.startswith('convnext_encoder'):
+        #    param.requires_grad = False
+        #    print(f"Froze parameter: {name}")
+        #if name.startswith('refinement_stage2'):
+        #    param.requires_grad = False
+        #    print(f"Froze parameter: {name}")
+
+    model = DDP(model, device_ids=[rank], find_unused_parameters=True, gradient_as_bucket_view=True) #find_unused_parameters=True
 
     optimizer = get_optimizer(args, model)
     lr_scheduler = get_lr_scheduler(args, optimizer)
+    #scaler = GradScaler()
 
     criterion_l1 = nn.L1Loss(reduction='mean')
     criterion_l2 = nn.MSELoss(reduction='mean')
@@ -252,17 +262,17 @@ def train(args):
         if not ckpt_files:
             raise FileNotFoundError(f"No checkpoint files found in {args.ckpt_dir}.")
         
-        ckpt_files.sort(key=lambda x: int(x.split('_')[1].split('.ckpt')[0]))
+        ckpt_files.sort(key=lambda x: int(x.split('_')[-1].split('.ckpt')[0]))
         last_ckpt_path = os.path.join(args.ckpt_dir, ckpt_files[-1])
 
         if rank == 0:
-            logger.info(f"Loading the last pretrained model from {args.ckpt_dir}: {last_ckpt_path}")
+            logger.info(f"Loading the last pretrained model from {last_ckpt_path}")
         
         start_epoch = load_checkpoint(model, optimizer, lr_scheduler, last_ckpt_path, weights_only=False)
         
         if rank == 0:
             logger.success(f"Successfully loaded the pretrained model from {args.ckpt_dir}")
-        #torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
+        torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
     
     if rank == 0:
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -275,7 +285,7 @@ def train(args):
 
 
     for epoch_idx in range(start_epoch, args.epochs):
-
+        
         if isinstance(train_dataloader.sampler, torch.utils.data.distributed.DistributedSampler):
             train_dataloader.sampler.set_epoch(epoch_idx)
 
@@ -295,23 +305,22 @@ def train(args):
                 sparse = input_padding(sparse)
 
             optimizer.zero_grad()
-            init_pred, final_pred, confidence = model(rgb, stereo, sparse)
+            #with autocast(device_type='cuda', dtype=torch.float16):
+            init_pred, final_pred, _, preds = model(rgb, stereo, sparse)
 
             if args.model == 'depth_fusion_swin':
                 rgb = rgb[:, :, :256, :1216]
-                confidence = confidence[:, :, :256, :1216]
+                #confidence = confidence[:, :, :256, :1216]
                 init_pred = init_pred[:, :, :256, :1216]
                 final_pred = final_pred[:, :, :256, :1216]
 
             mask = (groundtruth > 1e-8)
 
-            #loss_inter = compute_depth_losses(inter_upsamples, groundtruth, args)
-            loss_edges = edge_aware_smoothness_per_pixel(rgb, final_pred)
-            loss_init = criterion_l2(init_pred[mask], groundtruth[mask]) + 0.5 * criterion_l1(init_pred[mask], groundtruth[mask])
-            loss_final = criterion_l2(final_pred[mask], groundtruth[mask]) + 0.5 * criterion_l1(final_pred[mask], groundtruth[mask])
-
-            loss = 0.6 * loss_edges + 0.5 * loss_init + loss_final
+            #loss_residual = 0.4 * criterion_l2(dense_lidar[mask]+init_pred[mask], groundtruth[mask]) + criterion_l1(dense_lidar[mask]+init_pred[mask], groundtruth[mask])
+            #loss = 0.7 * criterion_l2(final_pred[mask], groundtruth[mask]) + criterion_l1(final_pred[mask], groundtruth[mask])
+            loss = l1l2_loss(preds, groundtruth, gamma=0.6)
             loss.backward()
+
             optimizer.step()
 
             reduced_loss = loss.clone()
@@ -328,24 +337,15 @@ def train(args):
                     "prediction_loss": loss.item(),
                     "learning_rate": optimizer.param_groups[0]['lr']
                 })
-                """
-                if epoch_idx % 5 == 0 and batch_idx == 1:
-                    wandb.log({
-                        "Pred training": wandb.Image(final_pred, caption="Training"),
-                        "RGB training": wandb.Image(rgb, caption="Training"),
-                        "Stereo training": wandb.Image(stereo, caption="Training"),
-                        "Lidar training": wandb.Image(sparse, caption="Training"),
-                        "GT Training": wandb.Image(groundtruth, caption="Training")
-                    })
-                """
-            if isinstance(lr_scheduler, optim.lr_scheduler.CyclicLR):
-                lr_scheduler.step()
 
-        if isinstance(lr_scheduler, optim.lr_scheduler.CosineAnnealingLR):
-            lr_scheduler.step()
+            #if isinstance(lr_scheduler, optim.lr_scheduler.CyclicLR):
+            #    lr_scheduler.step()
 
-        elif isinstance(lr_scheduler, optim.lr_scheduler.StepLR):
-            lr_scheduler.step()
+        #if isinstance(lr_scheduler, optim.lr_scheduler.CosineAnnealingLR):
+        #    lr_scheduler.step()
+
+        #elif isinstance(lr_scheduler, optim.lr_scheduler.MultiStepLR):
+        lr_scheduler.step()
 
         epoch_loss_tensor = torch.tensor(epoch_loss, device='cuda')
         dist.all_reduce(epoch_loss_tensor)
@@ -367,7 +367,6 @@ def train(args):
                     best_rmse = current_rmse
                     save_checkpoint(args.ckpt_dir, model, optimizer, lr_scheduler, epoch_idx)
 
-
                 print("\nValidation Metrics:")
                 for metric, value in metrics_eval.items():
                     print(f"{metric:<15}: {value:.4f}")
@@ -375,11 +374,11 @@ def train(args):
     torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
     cleanup()
 
-def validate(rank, model, val_loader, metric_evaluator, args):
 
+def validate(rank, model, val_loader, metric_evaluator, args):
     model.eval()
     total_metrics = {metric: 0.0 for metric in metric_evaluator.metrics}
-    num_batches = 0
+    total_samples = 0  
 
     progress_bar = tqdm(enumerate(val_loader), total=len(val_loader), desc="Validation", disable=(rank != 0))
 
@@ -392,7 +391,7 @@ def validate(rank, model, val_loader, metric_evaluator, args):
                 stereo = input_padding(stereo)
                 sparse = input_padding(sparse)
 
-            init_pred, final_pred, confidence = model(rgb, stereo, sparse)
+            init_pred, final_pred, confidence, preds = model(rgb, stereo, sparse)
 
             if args.model == 'depth_fusion_swin':
                 stereo = stereo[:, :, :256, :1216]
@@ -400,30 +399,40 @@ def validate(rank, model, val_loader, metric_evaluator, args):
                 final_pred = final_pred[:, :, :256, :1216]
                 confidence = confidence[:, :, :256, :1216]
 
-            #depth_stereo = disparity_to_depth(stereo, width)
-            #depth_groundtruth = disparity_to_depth(groundtruth, width)
-            #depth_pred = disparity_to_depth(final_pred, width)
-            #depth_init = disparity_to_depth(init_pred, width)
+            # Evaluate metrics for the current batch
+            batch_metrics = metric_evaluator.evaluate_metrics(final_pred, groundtruth) #change in stage 2 to final_pred
+            batch_size = groundtruth.size(0)  
 
-            metric_results = metric_evaluator.evaluate_metrics(final_pred, groundtruth)
+            for metric, value in batch_metrics.items():
+                total_metrics[metric] += value.item() * batch_size 
 
-            for metric, value in metric_results.items():
-                total_metrics[metric] += value.item() 
+            total_samples += batch_size
 
-            num_batches += 1
-            avg_metrics = {metric: total / num_batches for metric, total in total_metrics.items()}
+            avg_metrics = {metric: total / total_samples for metric, total in total_metrics.items()}
             progress_bar.set_postfix({metric: f"{value:.4f}" for metric, value in avg_metrics.items()})
 
             if batch_idx == 0 and rank == 0:
-                #log_predictions(rank, depth_groundtruth, depth_stereo, depth_init, depth_pred, confidence, num_samples=1, caption="Validation Predictions")
-                log_predictions(rank, groundtruth, stereo, init_pred, final_pred, confidence, num_samples=1, caption="Validation Predictions")
+                log_predictions(rank, 
+                                groundtruth, 
+                                stereo, 
+                                init_pred, 
+                                final_pred, 
+                                confidence, 
+                                num_samples=min(batch_size, 1), caption="Validation Predictions")
 
-    avg_metrics = {metric: total / num_batches for metric, total in total_metrics.items()}
+    # Distributed reduction if applicable
     if dist.is_initialized():
-        for metric in avg_metrics:
-            metric_tensor = torch.tensor(avg_metrics[metric], dtype=torch.float32, device="cuda")
+        for metric in total_metrics:
+            metric_tensor = torch.tensor(total_metrics[metric], dtype=torch.float32, device="cuda")
             dist.all_reduce(metric_tensor, op=dist.ReduceOp.SUM)
-            avg_metrics[metric] = metric_tensor.item() / dist.get_world_size()
+            total_metrics[metric] = metric_tensor.item()
+
+        total_samples_tensor = torch.tensor(total_samples, dtype=torch.float32, device="cuda")
+        dist.all_reduce(total_samples_tensor, op=dist.ReduceOp.SUM)
+        total_samples = int(total_samples_tensor.item())
+
+    # Final average metrics
+    avg_metrics = {metric: total / total_samples for metric, total in total_metrics.items()}
 
     if rank == 0:
         wandb.log(avg_metrics)
@@ -435,8 +444,6 @@ def main():
     args = parse_args()
     os.makedirs(args.ckpt_dir, exist_ok=True)
     train(args=args)
-
-
 
 if __name__ == '__main__':
     main()

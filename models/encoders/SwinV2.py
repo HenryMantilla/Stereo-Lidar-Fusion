@@ -5,6 +5,8 @@ import torch.utils.checkpoint as checkpoint
 from timm.layers import DropPath, to_2tuple, trunc_normal_
 import numpy as np
 
+from models.modules import ConvMixer, CBAM
+
 
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
@@ -410,7 +412,10 @@ class BasicLayer(nn.Module):
                                  norm_layer=norm_layer,
                                  pretrained_window_size=pretrained_window_size)
             for i in range(depth)])
-
+        
+        self.cbam = CBAM(dim)
+        self.convmixer_layer = ConvMixer(dim, kernel_size=7, depth=2, groups=dim//4)
+        self.conv = nn.Conv2d(dim*3, dim, kernel_size=3, padding=1)
         # patch merging layer
         if downsample is not None:
             self.downsample = downsample(input_resolution, dim=dim, norm_layer=norm_layer)
@@ -418,13 +423,29 @@ class BasicLayer(nn.Module):
             self.downsample = None
 
     def forward(self, x):
+        
+        B,_,C = x.shape
+        H,W = self.input_resolution
+
+        x_reshaped = x.view(B,H,W,C).permute(0,3,1,2)
+        x_cnn = self.convmixer_layer(x_reshaped)
+        x_cbam = self.cbam(x_reshaped)
+
         for blk in self.blocks:
             if self.use_checkpoint:
                 x = checkpoint.checkpoint(blk, x)
             else:
                 x = blk(x)
+
+        x = x.view(B, H, W, C).permute(0,3,1,2)
+        x = torch.cat([x, x_cbam, x_cnn], dim=1)
+        x = self.conv(x)
+
+        x = x.permute(0,2,3,1).view(B, -1, C)
+
         if self.downsample is not None:
             x = self.downsample(x)
+
         return x
 
     def extra_repr(self) -> str:
@@ -553,7 +574,6 @@ class SwinTransformerV2(nn.Module):
 
         # stochastic depth
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
-        in_ch = [128, 256, 512, 1408]
 
         # build layers
         self.layers = nn.ModuleList()
@@ -573,9 +593,6 @@ class SwinTransformerV2(nn.Module):
                                use_checkpoint=use_checkpoint,
                                pretrained_window_size=pretrained_window_sizes[i_layer])
             self.layers.append(layer)
-
-            reduce_ch = nn.Conv2d(in_ch[i_layer], embed_dim* 2 ** i_layer, kernel_size=3, padding=1)
-            setattr(self, f"conv_reduce{i_layer + 1}", reduce_ch)
 
         self.norm = norm_layer(self.num_features)
         self.avgpool = nn.AdaptiveAvgPool1d(1)
@@ -610,20 +627,15 @@ class SwinTransformerV2(nn.Module):
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
 
-        layer_index = 0
-        for layer in self.layers:
+        for i_layer,layer in enumerate(self.layers):
             x = layer(x)
-            reduce_ch = getattr(self, f"conv_reduce{layer_index + 1}")
 
             B, _, C = x.shape
-            H = self.patches_resolution[0] // (2 ** ((layer_index + 1) - 1))
-            W = self.patches_resolution[1] // (2 ** ((layer_index + 1) - 1))
+            H = self.patches_resolution[0] // (2 ** i_layer)
+            W = self.patches_resolution[1] // (2 ** i_layer)
             x_reshaped = x.view(B, H, W, -1).permute(0, 3, 1, 2)
 
-            x_reshaped = reduce_ch(torch.cat([x_reshaped, cnn_features[layer_index]], dim=1))
             intermediate_features.append(x_reshaped)
-
-            layer_index += 1
 
         x = self.norm(x)  # B L C
 

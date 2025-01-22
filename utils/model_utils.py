@@ -16,30 +16,36 @@ def save_checkpoint(ckpt_dir, model, optim, scheduler, epoch):
         'epoch': epoch
     }
 
-    ckpt_path = os.path.join(ckpt_dir, 'checkpoint_epoch_{:02d}.ckpt'.format(epoch))
+    ckpt_path = os.path.join(ckpt_dir, 'checkpoint_epoch_{:02d}.ckpt'.format(epoch+1))
     torch.save(states, ckpt_path)
 
     return ckpt_path
 
 
 def load_checkpoint(model, optimizer, scheduler, ckpt_path, weights_only):
-
     if not ckpt_path or not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"Checkpoint not found at {ckpt_path}")
     
-    checkpoint = torch.load(ckpt_path, weights_only)
+    checkpoint = torch.load(ckpt_path, map_location='cpu')
     
     if hasattr(model, 'module'):
-        model.module.load_state_dict(checkpoint['model_state_dict'])
+        model.module.load_state_dict(checkpoint['model'])
     else:
-        model.load_state_dict(checkpoint['model_state_dict'])
-
+        model.load_state_dict(checkpoint['model'])
+    
     if not weights_only:
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if scheduler is not None:
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        if 'optim' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optim'])
+        if scheduler is not None and 'scheduler' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler'])
 
-    return checkpoint['epoch']
+    last_epoch = checkpoint.get('epoch', 0)
+    # Release memory used by the checkpoint
+    del checkpoint
+    torch.cuda.empty_cache()
+
+    return last_epoch
+
 
 def get_optimizer(args, model):
     optimizer_classes = {
@@ -63,7 +69,7 @@ def get_optimizer(args, model):
 
 def get_lr_scheduler(args, optimizer):
     lr_schedulers = {
-        'step': optim.lr_scheduler.StepLR,
+        'multi_step': optim.lr_scheduler.MultiStepLR,
         'cosine': optim.lr_scheduler.CosineAnnealingLR, #t_max, eta_min
         'cyclic': optim.lr_scheduler.CyclicLR, #base_lr, max_lr, step_size_up, mode
     }
@@ -72,13 +78,13 @@ def get_lr_scheduler(args, optimizer):
         raise ValueError(f"Unknown optimizer scheduler {args.scheduler}")
 
     lr_schedulers_params = {
-        'step': {
-            'step_size': 25,
-            'gamma': 0.1
+        'multi_step': {
+            'milestones': [50, 60, 70, 80, 90],
+            'gamma': 0.5
         },
         'cosine': {
             'T_max': args.epochs, 
-            'eta_min': 1e-6,  
+            'eta_min': 1e-5,  
         },
         'cyclic': {
             'base_lr': 0.0001, 

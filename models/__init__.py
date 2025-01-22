@@ -1,5 +1,6 @@
 from models.fusion_models.pvt_model import DepthFusionPVT
-from models.fusion_models.swin_model import DepthFusionSwin
+#from models.fusion_models.swin_model import DepthFusionSwin
+from models.fusion_models.sam_model import DepthFusionSwin
 from models.icra import FusionModel
 
 __models__ = {

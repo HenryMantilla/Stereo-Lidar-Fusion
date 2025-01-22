@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from functools import partial
 
 from timm.layers import DropPath, trunc_normal_
+from models.modules import ConvMixer, CBAM
 from models.modules import PatchEmbedding, SpatialReductionAttention, Mlp
 
 
@@ -84,7 +85,6 @@ class PvtFamily():
         )
         return model
 
-"""
 class Block(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, sr_ratio=1):
@@ -100,11 +100,25 @@ class Block(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
+        self.cbam = CBAM(dim)
+        #self.convmixer_layer = ConvMixer(dim, kernel_size=7, depth=2, groups=dim//4)
+        self.conv = nn.Conv2d(dim*2, dim, kernel_size=3, padding=1)
+
 
     def forward(self, x_stereo, x_sparse, H, W):
 
         x = x_sparse + self.drop_path(self.attn(self.norm1(x_stereo), self.norm1(x_sparse), H, W))
         x = x + self.drop_path(self.mlp(self.norm2(x)))
+
+        B, L, C = x.shape
+        x_reshaped = x.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
+
+        #x_cnn = self.convmixer_layer(x_reshaped)
+        x_cbam = self.cbam(x_reshaped)
+
+        x = torch.cat([x_reshaped, x_cbam], dim=1)
+        x = self.conv(x)
+        x = x.permute(0,2,3,1).view(B,L,C)
 
         return x
     
@@ -192,14 +206,12 @@ class PyramidVisionTransformer(nn.Module):
             x_sparse, _ = patch_embed(x_sparse)
 
             if i == self.num_stages - 1:
-                pos_embed_sparse = self._get_pos_embed(pos_embed[:, 1:], patch_embed, H, W)
-                pos_embed_stereo = self._get_pos_embed(pos_embed[:, 1:], patch_embed, H, W)
+                pos_embed = self._get_pos_embed(pos_embed[:, 1:], patch_embed, H, W)
             else:
-                pos_embed_sparse = self._get_pos_embed(pos_embed, patch_embed, H, W)
-                pos_embed_stereo = self._get_pos_embed(pos_embed, patch_embed, H, W)
+                pos_embed = self._get_pos_embed(pos_embed, patch_embed, H, W)
 
-            x_stereo = pos_drop(x_stereo + pos_embed_stereo)
-            x_sparse = pos_drop(x_sparse + pos_embed_sparse)
+            x_stereo = pos_drop(x_stereo + pos_embed)
+            x_sparse = pos_drop(x_sparse + pos_embed)
 
             for blk in block:
                 x_sparse = blk(x_stereo, x_sparse, H, W)
@@ -215,8 +227,10 @@ class PyramidVisionTransformer(nn.Module):
         x_sparse, intermediate_features = self.forward_features(x_stereo, x_sparse)
 
         return x_sparse, intermediate_features
-"""    
+    
 
+########################
+"""
 class Block(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, sr_ratio=1):
@@ -347,3 +361,4 @@ class PyramidVisionTransformer(nn.Module):
         x, intermediate = self.forward_features(x, cnn_features)
 
         return x, intermediate
+"""

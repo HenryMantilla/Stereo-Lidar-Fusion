@@ -312,11 +312,22 @@ class Dynamic_deformablev2(nn.Module):
         self.aff_scale_const.requires_grad = False
 
         # Dummy parameters for gathering
+        """
         self.w = nn.Parameter(torch.ones((self.ch_f, 1, self.k_f, self.k_f)))
         self.b = nn.Parameter(torch.zeros(self.ch_f))
 
         self.w.requires_grad = False
         self.b.requires_grad = False
+        """
+
+        #self.w = nn.Parameter(torch.Tensor(self.ch_f, 1, self.k_f, self.k_f))  # Shape: (out_channels, in_channels, kH, kW)
+        w = torch.Tensor(self.ch_f, 1, self.k_f, self.k_f).cuda()  # Initialize w on the correct device
+        self.w = nn.Parameter((w / torch.sum(w, 1).unsqueeze(1).expand_as(w)).to(w.device))
+        self.b = nn.Parameter(torch.Tensor(self.ch_f))  # Shape: (out_channels)
+
+        # Initialize weights and biases
+        nn.init.kaiming_normal_(self.w, mode='fan_out', nonlinearity='relu')
+        nn.init.constant_(self.b, 0)
 
         self.w_conf = nn.Parameter(torch.ones((1, 1, 1, 1)))
         self.w_conf.requires_grad = False
@@ -397,8 +408,6 @@ class Dynamic_deformablev2(nn.Module):
             list_feat.append(feat_result)
 
             feat_result = (1 - mask_fix * confidence) * feat_result + mask_fix * confidence * feat_fix
-        #return {'pred': feat_result,'pred_init': feat_init,"list_feat": list_feat,"offset": offset1,"offset2": offset2,"aff": aff1,"aff2": aff2,"aff3": aff3,"dynamic": dynamic}
-
         return feat_result
 
 
