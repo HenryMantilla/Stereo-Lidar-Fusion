@@ -1,6 +1,5 @@
 import os
 import torch
-import random
 import numpy as np
 
 from utils import data_utils
@@ -20,7 +19,7 @@ class KittiDepthCompletion(data.Dataset):
         split_path = os.path.join(data_path, mode)
 
         self.crop_size = crop_size
-        self.rgb_filenames, self.stereo_filenames, self.sparse_filenames, self.gt_filenames = data_utils.get_kitti_files(split_path)
+        self.rgb_left_filenames, self.rgb_right_filenames, self.sparse_filenames, self.gt_filenames = data_utils.get_kitti_files(split_path)
         self.training = training
 
         self.transform_train = transforms.Compose([
@@ -34,68 +33,64 @@ class KittiDepthCompletion(data.Dataset):
         ])
 
     def __len__(self):
-        return len(self.stereo_filenames)
+        return len(self.sparse_filenames)
     
     def __getitem__(self, idx):
-        
-        rgb = frame_utils.read_rgb(self.rgb_filenames[idx])
-        stereo_disp = frame_utils.disparity_to_depth_kitti(frame_utils.read_disp(self.stereo_filenames[idx]))
-        sparse_disp = frame_utils.read_depth(self.sparse_filenames[idx])
-        gt_disp = frame_utils.read_depth(self.gt_filenames[idx])
+
+        rgb_left = frame_utils.read_rgb(self.rgb_left_filenames[idx])     
+        rgb_right = frame_utils.read_rgb(self.rgb_right_filenames[idx])   
+        sparse_disp = frame_utils.read_depth(self.sparse_filenames[idx]) #frame_utils.depth_to_disparity(frame_utils.read_depth(self.sparse_filenames[idx]))
+        gt_disp = frame_utils.read_depth(self.gt_filenames[idx]) #frame_utils.depth_to_disparity(frame_utils.read_depth(self.gt_filenames[idx]))
 
         width = gt_disp.shape[1]
 
-        if self.training: 
-            rgb_crop, stereo_crop, sparse_crop, gt_crop = [frame_utils.crop_bottom_center(x, self.crop_size) for x in [rgb, stereo_disp, sparse_disp, gt_disp]]
-            
-            #sparse_max_depth = np.max(sparse_crop)
-            #sparse_crop_ip = frame_utils.fill_in_fast(np.squeeze(sparse_crop, axis=-1), max_depth=sparse_max_depth, blur_type='gaussian')
-            
-            if random.random() > 0.5:
-                rgb_crop = np.flip(rgb_crop, axis=1).copy()
-                stereo_crop = np.flip(stereo_crop, axis=1).copy()
-                sparse_crop = np.flip(sparse_crop, axis=1).copy()
-                gt_crop = np.flip(gt_crop, axis=1).copy()
-        
-            if random.random() > 0.5:
-                rgb_crop = np.flip(rgb_crop, axis=0).copy()
-                stereo_crop = np.flip(stereo_crop, axis=0).copy()
-                sparse_crop = np.flip(sparse_crop, axis=0).copy()
-                gt_crop = np.flip(gt_crop, axis=0).copy()
+        rgb_left_crop = frame_utils.crop_bottom_center(rgb_left, self.crop_size)
+        rgb_right_crop = frame_utils.crop_bottom_center(rgb_right, self.crop_size)
+        sparse_crop = frame_utils.crop_bottom_center(sparse_disp, self.crop_size)
+        gt_crop = frame_utils.crop_bottom_center(gt_disp, self.crop_size)
 
-        else:
-            rgb_crop, stereo_crop, sparse_crop, gt_crop = list(map(lambda x: frame_utils.crop_bottom_center(x, self.crop_size),
-                                                                   [rgb, stereo_disp, sparse_disp, gt_disp]))
-            #sparse_max_depth = np.max(sparse_crop)
-            #sparse_crop_ip = frame_utils.fill_in_fast(np.squeeze(sparse_crop, axis=-1), max_depth=sparse_max_depth, blur_type='gaussian')
-            rgb, stereo, sparse, gt = [self.transform_val(x) for x in [rgb_crop, stereo_crop, sparse_crop, gt_crop]] #rgb_crop, stereo_crop, sparse_crop, gt_crop
-            stereo_lidar = torch.where(sparse > 1e-8, sparse, stereo)
-        
         if self.training:
+            rgb_left_clean = self.transform_train(rgb_left_crop)   
+            rgb_right_clean = self.transform_train(rgb_right_crop) 
+            sparse = self.transform_train(sparse_crop)
+            gt = self.transform_train(gt_crop)
 
-            rgb, stereo, sparse, gt = [self.transform_train(x) for x in [rgb_crop, stereo_crop, sparse_crop, gt_crop]]
+            rgb_left_aug = rgb_left_clean.clone()
 
             brightness = np.random.uniform(0.6, 1.2)
             contrast = np.random.uniform(0.6, 1.2)
             saturation = np.random.uniform(0.6, 1.2)
             hue = np.random.uniform(-0.1, 0.1)
 
-            rgb = transforms.functional.adjust_brightness(rgb, brightness)
-            rgb = transforms.functional.adjust_contrast(rgb, contrast)
-            rgb = transforms.functional.adjust_saturation(rgb, saturation)
-            rgb = transforms.functional.adjust_hue(rgb, hue)
+            rgb_left_aug = transforms.functional.adjust_brightness(rgb_left_aug, brightness)
+            rgb_left_aug = transforms.functional.adjust_contrast(rgb_left_aug, contrast)
+            rgb_left_aug = transforms.functional.adjust_saturation(rgb_left_aug, saturation)
+            rgb_left_aug = transforms.functional.adjust_hue(rgb_left_aug, hue)
 
-            stereo_lidar = torch.where(sparse > 1e-8, sparse, stereo)
+            rgb_left_aug = transforms.functional.normalize(rgb_left_aug, (0.485, 0.456, 0.406),
+                               (0.229, 0.224, 0.225), inplace=True)
 
-            degree = float(np.random.uniform(-5.0, 5.0))
-            rgb = transforms.functional.rotate(rgb, angle=degree, interpolation=transforms.InterpolationMode.BILINEAR)
-            #stereo = transforms.functional.rotate(stereo, angle=degree, interpolation=transforms.InterpolationMode.NEAREST)
-            stereo_lidar = transforms.functional.rotate(stereo_lidar, angle=degree, interpolation=transforms.InterpolationMode.NEAREST)
-            sparse = transforms.functional.rotate(sparse, angle=degree, interpolation=transforms.InterpolationMode.NEAREST)
-            gt = transforms.functional.rotate(gt, angle=degree, interpolation=transforms.InterpolationMode.NEAREST)
-        
-        return rgb, stereo_lidar, sparse, gt, width
-    
+            #degree = float(np.random.uniform(-5.0, 5.0))
+            #rgb_left_aug = transforms.functional.rotate(
+            #    rgb_left_aug, angle=degree, interpolation=transforms.InterpolationMode.BILINEAR
+            #)
+
+            #if random.random() > 0.5:
+            #    rgb_left_aug = transforms.functional.hflip(rgb_left_aug)
+
+            return rgb_left_aug, rgb_left_clean, rgb_right_clean, sparse, gt, width
+
+        else:
+            rgb_left_clean = self.transform_val(rgb_left_crop)
+            rgb_right_clean = self.transform_val(rgb_right_crop)
+            sparse = self.transform_val(sparse_crop)
+            gt = self.transform_val(gt_crop)
+
+            rgb_left_aug = rgb_left_clean
+            rgb_left_aug = transforms.functional.normalize(rgb_left_aug, (0.485, 0.456, 0.406),
+                               (0.229, 0.224, 0.225), inplace=True)
+
+            return rgb_left_aug, rgb_left_clean, rgb_right_clean, sparse, gt, width
 
 def get_dataloader(args, train=True, distributed=False, rank=0, world_size=1):
 

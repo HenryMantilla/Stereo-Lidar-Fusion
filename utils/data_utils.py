@@ -24,33 +24,34 @@ def get_kitti_paths(data_path):
 def get_kitti_files(data_path):
 
     scene_paths = get_kitti_paths(data_path)
-    rgb_files, stereo_files, sparse_files, gt_files = [], [], [], []
+    rgb_left_files, rgb_right_files, sparse_files, gt_files = [], [], [], []
 
     for scene in scene_paths:
-        rgb_dir = os.path.join(scene, 'image_02', 'data')
-        stereo_dir = os.path.join(scene, 'stereo') 
+        rgb_left_dir = os.path.join(scene, 'image_02', 'data')
+        rgb_right_dir = os.path.join(scene, 'image_03', 'data')
         sparse_dir = os.path.join(scene, 'proj_depth', 'velodyne_raw', 'image_02')
         gt_dir = os.path.join(scene, 'proj_depth', 'groundtruth', 'image_02')
 
-        rgb_files.extend(sorted(glob(os.path.join(rgb_dir, "*.png"))))
-        stereo_files.extend(sorted(glob(os.path.join(stereo_dir, "*.png"))))
+        rgb_left_files.extend(sorted(glob(os.path.join(rgb_left_dir, "*.png"))))
+        rgb_right_files.extend(sorted(glob(os.path.join(rgb_right_dir, "*.png"))))
         sparse_files.extend(sorted(glob(os.path.join(sparse_dir, "*.png"))))
         gt_files.extend(sorted(glob(os.path.join(gt_dir, "*.png"))))
-        
-    assert len(stereo_files) == len(sparse_files) == len(gt_files) == len(rgb_files), \
+
+    """
+    assert len(rgb_left_files) == len(rgb_right_files) == len(sparse_files) == len(gt_files), \
     "The number of images must be the same."
     
-    """
-    num_files = len(stereo_files)
-    num_to_keep = int(num_files * 0.05)
+    
+    num_files = len(sparse_files)
+    num_to_keep = int(num_files * 0.1)
     selected_indices = random.sample(range(num_files), num_to_keep)
     selected_indices.sort()
 
     # Keep only selected files
-    stereo_files = [stereo_files[i] for i in selected_indices]
     sparse_files = [sparse_files[i] for i in selected_indices]
     gt_files = [gt_files[i] for i in selected_indices]
-    rgb_files = [rgb_files[i] for i in selected_indices]
+    rgb_left_files = [rgb_left_files[i] for i in selected_indices]
+    rgb_right_files = [rgb_right_files[i] for i in selected_indices]
     """
     
-    return rgb_files, stereo_files, sparse_files, gt_files 
+    return rgb_left_files, rgb_right_files, sparse_files, gt_files 

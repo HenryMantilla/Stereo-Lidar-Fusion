@@ -3,6 +3,8 @@ dcgm/
 logs_sbatch/
 checkpoints/
 wandb/
+build/
+dist/
 sam_checkpoints/
 *.slurm
 

@@ -4,7 +4,6 @@ import torch.distributed as dist
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 
-from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torchvision.utils import make_grid
 
@@ -18,7 +17,7 @@ from tqdm import tqdm
 from loguru import logger
 from datasets import __datasets__, get_dataloader
 from models import __models__
-from utils import get_lr_scheduler, get_optimizer, save_checkpoint, load_checkpoint, disparity_to_depth, MetricEvaluator
+from utils import get_lr_scheduler, get_optimizer, save_checkpoint, load_checkpoint, disparity_to_depth, depth_to_disparity_train, MetricEvaluator
 
 def parse_args():
 
@@ -47,6 +46,22 @@ def parse_args():
     parser.add_argument('--load_ckpt', help='Load model weights from a checkpoint')
     parser.add_argument('--resume', action='store_true', help='Continue training from a checkpoint')
 
+    # Architecture choices
+    parser.add_argument('--mixed_precision', action='store_true', help='use mixed precision')
+    parser.add_argument('--precision_dtype', default='float32', choices=['float16', 'bfloat16', 'float32'], help='Choose precision type: float16 or bfloat16 or float32')
+    parser.add_argument('--hidden_dims', nargs='+', type=int, default=[128]*3, help="hidden state and context dimensions")
+    parser.add_argument('--corr_levels', type=int, default=2, help="number of levels in the correlation pyramid")
+    parser.add_argument('--corr_radius', type=int, default=4, help="width of the correlation pyramid")
+    parser.add_argument('--n_downsample', type=int, default=2, help="resolution of the disparity field (1/2^K)")
+    parser.add_argument('--n_gru_layers', type=int, default=3, help="number of hidden GRU levels")
+    parser.add_argument('--max_disp', type=int, default=192, help="max disp range") #768 default from IGEV++
+    parser.add_argument('--s_disp_range', type=int, default=48, help="max disp of small disparity-range geometry encoding volume")
+    parser.add_argument('--m_disp_range', type=int, default=96, help="max disp of medium disparity-range geometry encoding volume")
+    parser.add_argument('--l_disp_range', type=int, default=192, help="max disp of large disparity-range geometry encoding volume")
+    parser.add_argument('--s_disp_interval', type=int, default=1, help="disp interval of small disparity-range geometry encoding volume")
+    parser.add_argument('--m_disp_interval', type=int, default=2, help="disp interval of medium disparity-range geometry encoding volume")
+    parser.add_argument('--l_disp_interval', type=int, default=4, help="disp interval of large disparity-range geometry encoding volume")
+
     return parser.parse_args()
 
 def setup_distributed():
@@ -64,43 +79,47 @@ def cleanup():
     if dist.is_initialized():
         dist.destroy_process_group()
 
-def log_predictions(rank, groundtruth, stereo, init_pred, final_pred, confidence, num_samples, caption="Predictions"):
+def log_predictions(rank, rgb_left, rgb_right, groundtruth, stereo, init_pred, final_pred, res_disp, res_depth, caption="Predictions"):
 
     if rank != 0:
         return
+
+    num_samples = 1
     
-    gt_samples = groundtruth[:num_samples].detach().cpu()
-    stereo_samples = stereo[:num_samples].detach().cpu()
-    init_samples = init_pred[:num_samples].detach().cpu()
-    final_samples = final_pred[:num_samples].detach().cpu()
-    confidence_samples = confidence[:num_samples].detach().cpu()
-    #dense_samples = dense_lidar[:num_samples].detach().cpu()
-    #depth_convnext_samples = depth_convnext[:num_samples].detach().cpu()
+    rgb_left_sample = rgb_left[:num_samples].detach().cpu()
+    rgb_right_sample = rgb_right[:num_samples].detach().cpu()
+    gt_sample = groundtruth[:num_samples].detach().cpu()
+    stereo_sample = stereo[:num_samples].detach().cpu()
+    init_sample = init_pred[:num_samples].detach().cpu()
+    final_sample = final_pred[:num_samples].detach().cpu()
+    res_disp_sample = res_disp[:num_samples].detach().cpu()
+    res_depth_sample = res_depth[:num_samples].detach().cpu()
 
-    gt_samples = apply_colormap(gt_samples, colormap='magma')
-    stereo_samples = apply_colormap(stereo_samples, colormap='magma')
-    init_samples = apply_colormap(init_samples, colormap='magma')
-    final_samples = apply_colormap(final_samples, colormap='magma')
-    confidence_samples = apply_colormap(confidence_samples, colormap='magma')
-    #dense_samples = apply_colormap(dense_samples, colormap='magma')
-    #depth_convnext_samples = apply_colormap(depth_convnext_samples, colormap='magma')
+    gt_sample = apply_colormap(gt_sample, colormap='magma')
+    stereo_sample = apply_colormap(stereo_sample, colormap='magma')
+    init_sample = apply_colormap(init_sample, colormap='magma')
+    final_sample = apply_colormap(final_sample, colormap='magma')
+    res_disp_sample = apply_colormap(res_disp_sample, colormap='magma')
+    res_depth_sample = apply_colormap(res_depth_sample, colormap='magma')
 
-    gt_grid = make_grid(gt_samples, nrow=num_samples, normalize=False, scale_each=False)
-    stereo_grid = make_grid(stereo_samples, nrow=num_samples, normalize=False, scale_each=False)
-    init_grid = make_grid(init_samples, nrow=num_samples, normalize=False, scale_each=False)
-    final_grid = make_grid(final_samples, nrow=num_samples, normalize=False, scale_each=False)
-    confidence_grid = make_grid(confidence_samples, nrow=num_samples, normalize=False, scale_each=False)
-    #dense_grid = make_grid(dense_samples, nrow=num_samples, normalize=False, scale_each=False)
-    #depth_convnext_grid = make_grid(depth_convnext_samples, nrow=num_samples, normalize=False, scale_each=False)
+    rgb_left_grid = make_grid(rgb_left_sample.unsqueeze(0))
+    rgb_right_grid = make_grid(rgb_right_sample.unsqueeze(0))
+    gt_grid = make_grid(gt_sample.unsqueeze(0))
+    stereo_grid = make_grid(stereo_sample.unsqueeze(0))
+    init_grid = make_grid(init_sample.unsqueeze(0))
+    final_grid = make_grid(final_sample.unsqueeze(0))
+    res_disp_grid = make_grid(res_disp_sample.unsqueeze(0))
+    res_depth_grid = make_grid(res_depth_sample.unsqueeze(0))
 
     wandb.log({
+        "Left Image": wandb.Image(rgb_left_grid, caption=caption),
+        "Right Image": wandb.Image(rgb_right_grid, caption=caption),
         "Groundtruth Depth": wandb.Image(gt_grid, caption=caption),
         "Stereo Inputs": wandb.Image(stereo_grid, caption=caption),
         "Init pred": wandb.Image(init_grid, caption=caption),
         "Final pred": wandb.Image(final_grid, caption=caption),
-        "Confidence": wandb.Image(confidence_grid, caption=caption),
-        #"First Refinement": wandb.Image(dense_grid, caption=caption),
-        #"Depth Convnext": wandb.Image(depth_convnext_grid, caption=caption)
+        "Disparity Residual": wandb.Image(res_disp_grid, caption=caption),
+        "Depth Residual": wandb.Image(res_depth_grid, caption=caption),
     })
 
 def apply_colormap(image_tensor, colormap='plasma'):
@@ -120,7 +139,7 @@ def apply_colormap(image_tensor, colormap='plasma'):
 
 def input_padding(x, target_width=1280):
 
-    B, C, H, W = x.shape
+    _,_,_, W = x.shape
 
     pad_w = target_width - W
     pad_h = 0  
@@ -129,7 +148,7 @@ def input_padding(x, target_width=1280):
     return x_padded
 
 
-def edge_aware_smoothness_per_pixel(rgb, depth):
+def edge_aware_smoothness(rgb, depth):
     def gradient_y(img):
         kernel = torch.tensor(
             [[1, 2, 1], [0, 0, 0], [-1, -2, -1]], dtype=img.dtype, device=img.device
@@ -160,54 +179,17 @@ def edge_aware_smoothness_per_pixel(rgb, depth):
     return torch.mean(smoothness_x) + torch.mean(smoothness_y)
 
 
-def l1l2_loss(predictions, ground_truth, gamma):
-    """
-    Computes the custom loss described in the equation using PyTorch's built-in loss functions.
-    
-    Args:
-        predictions (list of torch.Tensor): List of predicted depth maps [D^2, D^3, ..., D^N].
-        ground_truth (torch.Tensor): Ground truth depth map (D_gt) with shape [B, H, W].
-        gamma (float): Exponential weight factor.
-    
-    Returns:
-        torch.Tensor: The computed loss value.
-    """
-    # Loss functions
-    l1_loss_fn = nn.L1Loss(reduction='mean')
-    mse_loss_fn = nn.MSELoss(reduction='mean')
-    
-    # Create mask for valid ground truth values (D_gt > 0)
-    mask = ground_truth > 0
-
-    total_loss = 0.0
-    N = len(predictions) + 1  # Number of predictions including D^2 ... D^N
-
-    # Loop over predictions (D^2 to D^N)
-    for i, D_hat in enumerate(predictions, start=2):
-        # Apply the mask
-        valid_pred = D_hat[mask]
-        valid_gt = ground_truth[mask]
-
-        # Compute weighted L1 and L2 losses
-        weight = gamma ** (N - i)
-        l1_loss = l1_loss_fn(valid_pred, valid_gt)
-        l2_loss = mse_loss_fn(valid_pred, valid_gt)  # MSE is equivalent to L2 loss
-
-        # Combine losses for this prediction
-        total_loss += weight * (l1_loss + l2_loss)
-
-    return total_loss
+def charbonnier_loss(pred, target, epsilon=1e-6):
+    return torch.mean(torch.sqrt((pred - target) ** 2 + epsilon**2))
 
 
 def train(args):
 
     rank, world_size = setup_distributed()
-    #torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
 
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
     cudnn.benchmark = True
-    #cudnn.deterministic = True
 
     if rank == 0:
         os.environ["WANDB_START_METHOD"] = "thread"
@@ -216,8 +198,6 @@ def train(args):
             name=f'Fusion_{args.crop_size}_{args.batch_size}_{args.lr}_{args.epochs}',
             config=args,
             mode='online'
-            #id='vdgozqfe',
-            #resume="allow"
         )
     else:
         os.environ["WANDB_MODE"] = "offline"
@@ -225,27 +205,28 @@ def train(args):
     train_dataloader, _ = get_dataloader(args, train=True, distributed=(world_size > 1), rank=rank, world_size=world_size)
     val_dataloader, _ = get_dataloader(args, train=False, distributed=(world_size > 1), rank=rank, world_size=world_size)
 
-    if args.model == 'depth_fusion_pvt':
-        model = __models__[args.model](convnext_pretrained=True)
-    elif args.model == 'depth_fusion_swin':
-        model = __models__[args.model](convnext_pretrained=True)
+    model = __models__[args.model](args)
+
+    #trainable_layers = ["stereo_matching.cnet", "stereo_matching.feature", "stereo_matching.cost_agg"]
+    trainable_layers = ["stereo_matching.cnet", "stereo_matching.feature", "stereo_matching.cost_agg"]
+
+    for name, param in model.named_parameters():
+        if "stereo_matching" in name:
+            param.requires_grad = False
+            #if any(layer in name for layer in trainable_layers):
+            #    param.requires_grad = True
+            #else:
+            #    param.requires_grad = False
+        else:
+            param.requires_grad = True
 
     model.to(rank)
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
-    #for name, param in model.named_parameters():
-        #if name.startswith('convnext_encoder'):
-        #    param.requires_grad = False
-        #    print(f"Froze parameter: {name}")
-        #if name.startswith('refinement_stage2'):
-        #    param.requires_grad = False
-        #    print(f"Froze parameter: {name}")
-
-    model = DDP(model, device_ids=[rank], find_unused_parameters=True, gradient_as_bucket_view=True) #find_unused_parameters=True
+    model = DDP(model, device_ids=[rank], find_unused_parameters=True, gradient_as_bucket_view=True) 
 
     optimizer = get_optimizer(args, model)
     lr_scheduler = get_lr_scheduler(args, optimizer)
-    #scaler = GradScaler()
 
     criterion_l1 = nn.L1Loss(reduction='mean')
     criterion_l2 = nn.MSELoss(reduction='mean')
@@ -255,7 +236,6 @@ def train(args):
 
     start_epoch = 0
     best_rmse = float('inf')
-
 
     if args.resume or args.load_ckpt:
         ckpt_files = [f for f in os.listdir(args.ckpt_dir) if f.endswith('.ckpt')]
@@ -283,6 +263,17 @@ def train(args):
         logger.info(f"Starting training for {args.model} model on {args.dataset} dataset.")
         logger.info(f"Starting epoch {start_epoch}")
 
+    
+    def forward_hook(module, input, output):
+        if torch.isnan(output).any():
+            print(f"[Forward Hook] NaN detected in {module.__class__.__name__} ({module})")
+
+        # After you build your model (and wrap in DDP if needed)
+        # For a DDP-wrapped model, register hooks on model.module:
+        for name, module in model.named_modules():
+            module.register_forward_hook(forward_hook)
+
+        torch.autograd.set_detect_anomaly(True)
 
     for epoch_idx in range(start_epoch, args.epochs):
         
@@ -290,6 +281,7 @@ def train(args):
             train_dataloader.sampler.set_epoch(epoch_idx)
 
         model.train()
+        model.module.stereo_matching.eval()
         progress_bar = tqdm(enumerate(train_dataloader), 
                             total=len(train_dataloader), 
                             desc=f"Epoch {epoch_idx + 1}",
@@ -298,15 +290,14 @@ def train(args):
         epoch_loss = 0.0
 
         for batch_idx, batch_sample in progress_bar:
-            rgb, stereo, sparse, groundtruth, _ = [x.cuda(non_blocking=True) for x in batch_sample]
+            rgb_aug, rgb_left, rgb_right, sparse, groundtruth, width = [x.cuda(non_blocking=True) for x in batch_sample]
             if args.model == 'depth_fusion_swin':
                 rgb = input_padding(rgb)
                 stereo = input_padding(stereo)
                 sparse = input_padding(sparse)
 
             optimizer.zero_grad()
-            #with autocast(device_type='cuda', dtype=torch.float16):
-            init_pred, final_pred, _, preds = model(rgb, stereo, sparse)
+            stereo_depth, init_pred, final_pred, r_disp, r_depth = model(rgb_aug, rgb_left, rgb_right, sparse, width)
 
             if args.model == 'depth_fusion_swin':
                 rgb = rgb[:, :, :256, :1216]
@@ -316,11 +307,14 @@ def train(args):
 
             mask = (groundtruth > 1e-8)
 
-            #loss_residual = 0.4 * criterion_l2(dense_lidar[mask]+init_pred[mask], groundtruth[mask]) + criterion_l1(dense_lidar[mask]+init_pred[mask], groundtruth[mask])
-            #loss = 0.7 * criterion_l2(final_pred[mask], groundtruth[mask]) + criterion_l1(final_pred[mask], groundtruth[mask])
-            loss = l1l2_loss(preds, groundtruth, gamma=0.6)
+            #gt_disp = depth_to_disparity_train(groundtruth, width)
+            #mask_disp = gt_disp > 1e-8
+
+            loss_residual = criterion_l2(init_pred[mask], groundtruth[mask]) + criterion_l1(init_pred[mask], groundtruth[mask])
+            loss = 0.7 * criterion_l2(final_pred[mask], groundtruth[mask]) + criterion_l1(final_pred[mask], groundtruth[mask]) + 0.3 * loss_residual
             loss.backward()
 
+            #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0, norm_type=2.0, foreach=None)
             optimizer.step()
 
             reduced_loss = loss.clone()
@@ -331,20 +325,60 @@ def train(args):
 
             if rank == 0:
                 progress_bar.set_postfix(loss=reduced_loss.item())
+                #wandb.watch(model.module.conv_decoder, log="parameters", log_freq=50)
+                """
+                grad_norms_to_log = {}
+                problematic_layers = []
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        # Compute the L2 norm of the gradient
+                        grad_norm = param.grad.norm(p=2).item()
+                        grad_norms_to_log[f"grad_norm/{name}"] = grad_norm
+                        # Check for NaNs in the gradient
+                        if torch.isnan(param.grad).any():
+                            problematic_layers.append(name)
+                if problematic_layers:
+                    print("NaN detected in gradients for layers:")
+                    for layer in problematic_layers:
+                        print(f"  {layer}")
+
+                wandb.log(grad_norms_to_log) 
+                """
 
                 wandb.log({
                     "batch_loss": reduced_loss.item(),
                     "prediction_loss": loss.item(),
                     "learning_rate": optimizer.param_groups[0]['lr']
                 })
-
-            #if isinstance(lr_scheduler, optim.lr_scheduler.CyclicLR):
-            #    lr_scheduler.step()
+                
+                
+                total_norm = 0.0
+                for p in model.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)  # L2 norm of this parameter's gradient
+                        total_norm += param_norm.item() ** 2
+                total_norm = total_norm ** 0.5
+                
+                
+                if rank == 0:
+                    wandb.log({"grad_norm": total_norm})
+                    """
+                    if batch_idx % 100 == 0 and rank == 0:
+                        log_predictions(rank, 
+                                        rgb_left,
+                                        rgb_right,
+                                        groundtruth, 
+                                        stereo_depth, 
+                                        init_pred, 
+                                        final_pred, 
+                                        r_disp, 
+                                        r_depth,
+                                        caption="Train Predictions")
+                    """
 
         #if isinstance(lr_scheduler, optim.lr_scheduler.CosineAnnealingLR):
         #    lr_scheduler.step()
 
-        #elif isinstance(lr_scheduler, optim.lr_scheduler.MultiStepLR):
         lr_scheduler.step()
 
         epoch_loss_tensor = torch.tensor(epoch_loss, device='cuda')
@@ -384,14 +418,14 @@ def validate(rank, model, val_loader, metric_evaluator, args):
 
     with torch.no_grad():
         for batch_idx, batch_sample in progress_bar:
-            rgb, stereo, sparse, groundtruth, width = [x.cuda(non_blocking=True) for x in batch_sample]
+            rgb_aug, rgb_left, rgb_right, sparse, groundtruth, width = [x.cuda(non_blocking=True) for x in batch_sample]
 
             if args.model == 'depth_fusion_swin':
                 rgb = input_padding(rgb)
                 stereo = input_padding(stereo)
                 sparse = input_padding(sparse)
 
-            init_pred, final_pred, confidence, preds = model(rgb, stereo, sparse)
+            stereo_depth, init_pred, final_pred, r_disp, r_depth = model(rgb_aug, rgb_left, rgb_right, sparse, width)
 
             if args.model == 'depth_fusion_swin':
                 stereo = stereo[:, :, :256, :1216]
@@ -400,7 +434,7 @@ def validate(rank, model, val_loader, metric_evaluator, args):
                 confidence = confidence[:, :, :256, :1216]
 
             # Evaluate metrics for the current batch
-            batch_metrics = metric_evaluator.evaluate_metrics(final_pred, groundtruth) #change in stage 2 to final_pred
+            batch_metrics = metric_evaluator.evaluate_metrics(final_pred, groundtruth) 
             batch_size = groundtruth.size(0)  
 
             for metric, value in batch_metrics.items():
@@ -411,14 +445,18 @@ def validate(rank, model, val_loader, metric_evaluator, args):
             avg_metrics = {metric: total / total_samples for metric, total in total_metrics.items()}
             progress_bar.set_postfix({metric: f"{value:.4f}" for metric, value in avg_metrics.items()})
 
+            
             if batch_idx == 0 and rank == 0:
-                log_predictions(rank, 
+                log_predictions(rank,
+                                rgb_left,
+                                rgb_right, 
                                 groundtruth, 
-                                stereo, 
+                                stereo_depth, 
                                 init_pred, 
                                 final_pred, 
-                                confidence, 
-                                num_samples=min(batch_size, 1), caption="Validation Predictions")
+                                r_disp,
+                                r_depth, 
+                                caption="Validation Predictions")
 
     # Distributed reduction if applicable
     if dist.is_initialized():

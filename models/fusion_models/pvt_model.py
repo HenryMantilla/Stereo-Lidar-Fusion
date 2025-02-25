@@ -1,79 +1,104 @@
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
+#from models.igev_plus_plus.core.igev_stereo import IGEVStereo
+from models.igev.core.igev_stereo import IGEVStereo
+from utils.frame_utils import disparity_to_depth
 from models.encoders.PVT import PvtFamily
-from models.modules import CBAM
+from models.modules import CBAM, ConvBlock
 from models.dyspn import Dynamic_deformablev2
 
+def remove_module_prefix(state_dict):
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        new_key = key[7:] if key.startswith("module.") else key
+        new_state_dict[new_key] = value
+    return new_state_dict
+
 class DepthFusionPVT(nn.Module):
-    def __init__(self, convnext_pretrained):
+    def __init__(self, args):
         super().__init__()
 
-        # Embedding layers
-        self.rgb_embed = ResidualBlock(in_channels=3, out_channels=32)
-        self.lidar_embed = ResidualBlock(in_channels=1, out_channels=16)
+        self.stereo_matching = IGEVStereo(args)
 
+        checkpoint = torch.load('kitti15_igev.pth', map_location='cpu')
+        state_dict = checkpoint.get('state_dict', checkpoint)
+        state_dict = remove_module_prefix(state_dict)
+        
+        #Load the state dict into the stereo_matching submodule
+        self.stereo_matching.load_state_dict(state_dict)
+
+        self.rgb_conv = ConvBlock(in_ch=3, out_ch=48, normalization=False)
+        self.depth_conv = ConvBlock(in_ch=1, out_ch=16, normalization=False)
+        self.disp_conv = ConvBlock(in_ch=1, out_ch=16, normalization=False)
+
+        self.rgb_disp_conv = ConvBlock(in_ch=64, out_ch=64, normalization=False)
+        self.rgb_depth_conv = ConvBlock(in_ch=64, out_ch=64, normalization=False)
+
+        self.resnet_blks_disp = nn.Sequential(ResidualBlock(in_ch=64, out_ch=64, downsample=False),
+                                              ResidualBlock(in_ch=64, out_ch=64, downsample=False),
+                                              ResidualBlock(in_ch=64, out_ch=64, downsample=False))
+
+        self.resnet_blks_disp2 = nn.Sequential(ResidualBlock(in_ch=64, out_ch=128, downsample=True),
+                                              ResidualBlock(in_ch=128, out_ch=128, downsample=False),
+                                              ResidualBlock(in_ch=128, out_ch=128, downsample=False),
+                                              ResidualBlock(in_ch=128, out_ch=128, downsample=False))
+        
+        self.resnet_blks_depth = nn.Sequential(ResidualBlock(in_ch=64, out_ch=64, downsample=False),
+                                              ResidualBlock(in_ch=64, out_ch=64, downsample=False),
+                                              ResidualBlock(in_ch=64, out_ch=64, downsample=False))
+
+        self.resnet_blks_depth2 = nn.Sequential(ResidualBlock(in_ch=64, out_ch=128, downsample=True),
+                                                ResidualBlock(in_ch=128, out_ch=128, downsample=False),
+                                                ResidualBlock(in_ch=128, out_ch=128, downsample=False),
+                                                ResidualBlock(in_ch=128, out_ch=128, downsample=False))
         # PVT Backbone
         pvt_family = PvtFamily()
-        self.pvt = pvt_family.initialize_model(
-            config_name="pvt_medium", patch_size=4, in_chans=48, num_stages=4
-        )
+        self.pvt = pvt_family.initialize_model(config_name="pvt_medium", patch_size=4, in_chans=128, num_stages=4)
 
-        # Main ConvDecoder
-        self.conv_decoder = ConvDecoder(in_channels=512, out_channels=50)
+        self.conv_decoder = ConvDecoder(in_channels=512, out_channels=48)
+        self.dyspn = Dynamic_deformablev2(iteration=6)
 
-        # Flexible Decoders for intermediate features of ConvDecoder
-        self.flexible_decoders = None
-        self.dyspn_modules = None
+    def forward(self, rgb_left_aug, rgb_left, rgb_right, lidar, width):
 
-    def initialize_flexible_decoders(self, main_decoder_features):
-        """
-        Initialize FlexibleDecoder dynamically based on the channels of main_decoder_features.
-        """
-        self.flexible_decoders = nn.ModuleList([
-            FlexibleDecoder(in_channels=feature.size(1), out_channels=50, num_upsample=4 - i).cuda()
-            for i, feature in enumerate(main_decoder_features)
-        ])
-        self.dyspn_modules = nn.ModuleList([
-            Dynamic_deformablev2(iteration=6).cuda() for _ in range(len(self.flexible_decoders))
-        ])
+        disparity = self.stereo_matching(rgb_left, rgb_right, iters=16, test_mode=True)
+        disparity = torch.clamp(disparity, min=2.0, max=192.0)
 
+        disp2depth = disparity_to_depth(disparity, width)
+        #print(f'Disp Max: {disparity.max().item()}, Disp Min: {disparity.min().item()}')
+        #print(f'Depth Max: {disp2depth.max().item()}, Depth Min: {disp2depth.min().item()}')
 
-    def forward(self, rgb, stereo, lidar):
-        # Embedding layers
-        rgb_emb = self.rgb_embed(rgb)
-        lidar_emb = self.lidar_embed(stereo)
+        enc_rgb = self.rgb_conv(rgb_left_aug)
+        enc_disp = self.disp_conv(disparity)
+        enc_depth = self.depth_conv(lidar)
 
-        vit_input = torch.cat([rgb_emb, lidar_emb], dim=1)
-        out_pvt, intermediate_pvt = self.pvt(vit_input, vit_input)
-        out_decoder, main_decoder_features = self.conv_decoder(out_pvt, intermediate_pvt)
+        enc_rgb_disp = self.rgb_disp_conv(torch.cat([enc_rgb, enc_disp], dim=1))
+        enc_rgb_depth = self.rgb_depth_conv(torch.cat([enc_rgb, enc_depth], dim=1))
 
-        if self.flexible_decoders is None:
-            self.initialize_flexible_decoders(main_decoder_features)
+        disp_feats = self.resnet_blks_disp(enc_rgb_disp)
+        depth_feats = self.resnet_blks_depth(enc_rgb_depth)
 
-        # First pass through FlexibleDecoder
-        flexible_outputs = [decoder(feature) for decoder, feature in zip(self.flexible_decoders, main_decoder_features)]
+        disp_feats2 = self.resnet_blks_disp2(disp_feats)
+        depth_feats2 = self.resnet_blks_depth2(depth_feats)
 
-        refinement_output = None
-        intermediate_refinement = []
+        mid_features = self.pvt(disp_feats2, depth_feats2)
 
-        for i, (dyspn, flexible_output) in enumerate(zip(self.dyspn_modules, flexible_outputs)):
-            # Prepare inputs for dyspn
-            depth_input = flexible_output[:, 49:50, :, :] + (refinement_output if refinement_output is not None else stereo) #lidar
-            #depth_input = torch.nan_to_num(depth_input, nan=0.0, posinf=1e6, neginf=-1e6)
-            guide1 = flexible_output[:, 0:24, :, :]  # Guide 1
-            guide2 = flexible_output[:, 24:48, :, :]  # Guide 2
-            confidence = flexible_output[:, 48:49, :, :]  # Confidence
+        residual_disp, residual_depth, confidence, guide = self.conv_decoder(mid_features, enc_rgb_disp, enc_rgb_depth, disp_feats, depth_feats, disp_feats2, depth_feats2)
 
-            # Process through dyspn
-            refinement_output = dyspn(depth_input, guide1, guide2, confidence, lidar)
-            intermediate_refinement.append(refinement_output)
+        enhanced_disp = disparity + residual_disp
+        enhanced_depth = disparity_to_depth(enhanced_disp, width) + residual_depth
+        #enhanced_depth = disp2depth + residual_depth
 
-        return depth_input, refinement_output, confidence, intermediate_refinement
+        final_pred = self.dyspn(enhanced_depth,
+                                guide[:, 0:24, :, :],
+                                guide[:, 24:48, :, :],
+                                confidence,
+                                lidar) 
 
+        return disp2depth, enhanced_depth, final_pred, residual_disp, residual_depth
 
 class ResidualBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_ch, out_ch, downsample=False):
         super().__init__()
         """
         Residual block with optional 1x1 convolution for channel matching.
@@ -82,19 +107,24 @@ class ResidualBlock(nn.Module):
             in_channels (int): Number of input channels.
             out_channels (int): Number of output channels.
         """
+
+        stride = 2 if downsample else 1
         
         # Main branch
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_ch)
         self.activation = nn.ReLU(inplace=True)
 
         # Shortcut branch
-        self.shortcut = (
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, bias=False)
-            if in_channels != out_channels else nn.Identity()
-        )
+        if downsample or in_ch != out_ch:
+            self.shortcut = (
+                nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=stride, bias=False)
+                if in_ch != out_ch else nn.Identity()
+            )
+        else:
+            self.shortcut = nn.Identity()
 
     def forward(self, x):
         """
@@ -126,43 +156,84 @@ class ConvDecoder(nn.Module):
         super().__init__()
 
         #Up+Conv+BN+ReLU+CBAM block
-        def upsample_conv(in_ch, out_ch):
-            return nn.Sequential(
+        def upsample_conv(in_ch, out_ch, use_cbam=True, reduction=16):
+            layers = [
                 nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-                nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
+                nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False),
                 nn.ReLU(inplace=True),
-                nn.BatchNorm2d(out_ch),
-                CBAM(out_ch)  
-            )
+                nn.BatchNorm2d(out_ch)
+            ]
+            
+            if use_cbam:
+                layers.append(CBAM(out_ch, reduction=reduction))
+            
+            return nn.Sequential(*layers)
 
-        self.stage1 = upsample_conv(in_channels, 512)   
-        self.stage2 = upsample_conv(512+320, 256)               
-        self.stage3 = upsample_conv(256+128, 128)             
-        self.stage4 = upsample_conv(128+64, 64)  
-        self.stage5 = upsample_conv(64, out_channels)
+        self.stage1 = upsample_conv(in_channels, 320, reduction=16)   
+        self.stage2 = upsample_conv(320+320, 128, reduction=8)               
+        self.stage3 = upsample_conv(128+128, 64, reduction=4)             
+        self.stage4 = upsample_conv(64+64, 64, reduction=4)  
+        self.stage5 = upsample_conv(64+256, 64, reduction=4)
+        #self.stage6 = upsample_conv(64, 64, use_cbam=False)
 
-    def forward(self, x, feats):
-        intermediate_features = []
+        self.conv_res_disp1 = ConvBlock(64+64, 64, normalization=False)
+        self.conv_res_disp_f1 = ConvBlock(64+64, 1, normalization=False)
 
-        x = self.stage1(x)
-        intermediate_features.append(x)
+        self.conv_res_disp2 = ConvBlock(64+64,64, normalization=False)
+        self.conv_res_disp_f2 = ConvBlock(64+64, 1, normalization=False)
+
+        self.conv_confidence = ConvBlock(64+128, 64)
+        self.conv_confidence_f = ConvBlock(64+128, 1)
+
+        self.conv_guide = ConvBlock(64+128, 64)
+        self.conv_guide_f = ConvBlock(64+128, out_channels, normalization=False, act=False)
+        
+        self.act = nn.Sigmoid()
+
+    def _concat(self, fd, fe, dim=1):
+        # Decoder feature may have additional padding
+        _, _, Hd, Wd = fd.shape
+        _, _, He, We = fe.shape
+
+        fd = F.interpolate(fd, size=(He, We), mode='bilinear', align_corners=True)
+
+        f = torch.cat((fd, fe), dim=dim)
+
+        return f
+    
+    def forward(self, feats, enc_rgb_disp, enc_rgb_depth, disparity, depth, disparity_2, depth_2):
+
+        x = self.stage1(feats[3]) # H/16 x W/16
 
         x = torch.cat([x, feats[2]], dim=1)
-        x = self.stage2(x)
-        intermediate_features.append(x)
+        x = self.stage2(x) # H/8 x W/8
 
-        x = torch.cat([x, feats[1]], dim=1)
-        x = self.stage3(x)
-        intermediate_features.append(x)
+        x = x = torch.cat([x, feats[1]], dim=1) 
+        x = self.stage3(x) # H/4 x W/4
 
-        x = torch.cat([x, feats[0]], dim=1)
-        x = self.stage4(x)
-        intermediate_features.append(x)
+        x = x = torch.cat([x, feats[0]], dim=1) 
+        x = self.stage4(x) # H/2 x W/2
 
-        x = self.stage5(x)
-        intermediate_features.append(x)
 
-        return x, intermediate_features
+        x = self._concat(torch.cat([disparity_2, depth_2], dim=1), x)
+        x = self.stage5(x) # H x W
+        #x = self.stage6(x)
+
+        residual_depth = self.conv_res_disp1(self._concat(x, depth))
+        residual_depth = self.conv_res_disp_f1(self._concat(residual_depth, enc_rgb_depth))
+
+        residual_disp = self.conv_res_disp2(self._concat(x, disparity))
+        residual_disp = self.conv_res_disp_f2(self._concat(residual_disp, enc_rgb_disp))
+
+        confidence = self.conv_confidence(self._concat(x, torch.cat([depth, disparity], dim=1)))
+        confidence = self.conv_confidence_f(self._concat(confidence, torch.cat([enc_rgb_depth, enc_rgb_disp], dim=1)))
+
+        guide = self.conv_guide(self._concat(x, torch.cat([depth, disparity], dim=1)))
+        guide = self.conv_guide_f(self._concat(guide, torch.cat([enc_rgb_depth, enc_rgb_disp], dim=1)))
+
+        #return 0.4*self.act(residual_disp)-0.2, 1.2*self.act(residual_depth)-0.6 
+        return residual_disp, residual_depth, confidence, guide
+
 
 class FlexibleDecoder(nn.Module):
     def __init__(self, in_channels, out_channels, num_upsample=1, kernel_size=2, stride=2, padding=0):
@@ -186,6 +257,7 @@ class FlexibleDecoder(nn.Module):
             for _ in range(num_upsample):
                 upsampling_layers.append(
                     nn.Sequential(
+                        ResidualBlock(in_channels, in_channels),
                         nn.ConvTranspose2d(
                             in_channels,
                             out_channels,

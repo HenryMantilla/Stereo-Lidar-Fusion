@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from functools import partial
 
-from timm.layers import DropPath, trunc_normal_
+from timm.models.layers import DropPath, trunc_normal_
 from models.modules import ConvMixer, CBAM
 from models.modules import PatchEmbedding, SpatialReductionAttention, Mlp
 
@@ -221,12 +221,12 @@ class PyramidVisionTransformer(nn.Module):
             x_stereo = x_stereo.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
             x_sparse = x_sparse.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
 
-        return x_sparse, intermediate_features
+        return intermediate_features
 
     def forward(self, x_stereo, x_sparse):
-        x_sparse, intermediate_features = self.forward_features(x_stereo, x_sparse)
+        intermediate_features = self.forward_features(x_stereo, x_sparse)
 
-        return x_sparse, intermediate_features
+        return intermediate_features
     
 
 ########################

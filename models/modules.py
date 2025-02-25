@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from timm.layers import to_2tuple
+from timm.models.layers import to_2tuple
 
 
 def tconv_block(in_ch, out_ch, kernel, stride=1, padding=0):
@@ -13,21 +13,34 @@ def tconv_block(in_ch, out_ch, kernel, stride=1, padding=0):
     
     return tconv_blk
 
+"""
 class ConvBlock(nn.Module):
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_ch),
-            nn.GELU()
-            #nn.ReLU(inplace=True),
+            nn.ReLU(inplace=True),
         )
 
     def forward(self, x):
 
         x = self.conv(x)  
         return x
+"""
 
+class ConvBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, normalization=True, act=True):
+        super().__init__()
+        layers = [nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=not normalization)]
+        if normalization:
+            layers.append(nn.BatchNorm2d(out_ch))
+        if act:
+            layers.append(nn.ReLU(inplace=True))
+        self.conv = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.conv(x)
 
 class ConvexUpsampling(nn.Module):
     def __init__(self, in_chans, upsample_factor=2):
@@ -103,7 +116,7 @@ class CBAM(nn.Module):
         self.conv_blk = nn.Sequential(
             nn.Conv2d(input_channels, input_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(input_channels),
-            nn.GELU(),
+            nn.ReLU(),
             nn.Conv2d(input_channels, input_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(input_channels)
 
@@ -111,7 +124,7 @@ class CBAM(nn.Module):
 
         self.channel_attention = ChannelAttention(input_channels, ratio=reduction)
         self.spatial_attention = SpatialAttention(kernel_size=kernel_size)
-        self.gelu = nn.GELU()
+        self.act = nn.ReLU()
 
     def forward(self, x):
 
@@ -126,7 +139,7 @@ class CBAM(nn.Module):
 
         x += residual
 
-        return self.gelu(x)
+        return self.act(x)
     
 class ConvMixer(nn.Module):
     def __init__(self, in_channels, kernel_size, depth, groups=1):

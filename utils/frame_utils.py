@@ -28,6 +28,26 @@ def depth_to_disparity(depth):
 
     return disparity
 
+def depth_to_disparity_train(depth, width):
+    baseline = 0.54
+    width_to_focal = {
+        1242: 721.5377,
+        1241: 718.8560,
+        1224: 707.0493,
+        1226: 708.2046,
+        1238: 718.3351
+    }
+    # Ensure depth is float32 tensor
+    depth = depth.float()
+    focal_length = width_to_focal.get(width, width_to_focal[1242])
+    # Create a mask for invalid depth values (<=0)
+    invalid_depth = depth <= 0
+    disparity = (focal_length * baseline) / (depth + 1e-8)
+    disparity[invalid_depth] = 0
+    
+    return disparity
+
+
 def disparity_to_depth_kitti(disparity):
     baseline = 0.54
     width_to_focal = dict()
@@ -43,9 +63,10 @@ def disparity_to_depth_kitti(disparity):
     focal_length = width_to_focal[width]
     
     depth = (focal_length * baseline) / (disparity + 1e-8)
-    #depth[disparity <= 0] = 0
+    depth[disparity <= 0] = 0
 
     return depth
+
 def disparity_to_depth(disparity, widths):
     baseline = 0.54
     width_to_focal = {
@@ -80,7 +101,7 @@ def read_rgb(image_path):
 
     image = np.array(Image.open(image_path)).astype(np.float32)
 
-    return normalize_image(image)
+    return image
 
 def read_disp(image_path):
 
@@ -93,9 +114,6 @@ def read_depth(image_path):
     depth = np.array(Image.open(image_path), dtype=np.uint16) / 256.0
     
     return np.expand_dims(depth, axis=-1)
-
-def resize_image(image, target_size=(1024, 1024)):
-    return cv2.resize(image, target_size, interpolation=cv2.INTER_LINEAR)
 
 def crop_fixed_size(image, crop_size):
 
