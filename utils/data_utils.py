@@ -37,13 +37,12 @@ def get_kitti_files(data_path):
         sparse_files.extend(sorted(glob(os.path.join(sparse_dir, "*.png"))))
         gt_files.extend(sorted(glob(os.path.join(gt_dir, "*.png"))))
 
-    """
     assert len(rgb_left_files) == len(rgb_right_files) == len(sparse_files) == len(gt_files), \
     "The number of images must be the same."
     
-    
+    """
     num_files = len(sparse_files)
-    num_to_keep = int(num_files * 0.1)
+    num_to_keep = int(num_files * 0.2)
     selected_indices = random.sample(range(num_files), num_to_keep)
     selected_indices.sort()
 
@@ -51,7 +50,7 @@ def get_kitti_files(data_path):
     sparse_files = [sparse_files[i] for i in selected_indices]
     gt_files = [gt_files[i] for i in selected_indices]
     rgb_left_files = [rgb_left_files[i] for i in selected_indices]
-    rgb_right_files = [rgb_right_files[i] for i in selected_indices]
+    rgb_right_files = [rgb_right_files[i] for i in selected_indices]"
     """
     
     return rgb_left_files, rgb_right_files, sparse_files, gt_files 

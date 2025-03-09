@@ -16,7 +16,7 @@ echo "head node is ${master_ip}:${master_port}"
 export OMP_NUM_THREADS=1
 #export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-torchrun --nnodes=1 --nproc_per_node=4 --node_rank=0 --master_addr=${master_ip} --master_port=${master_port} train.py \
+torchrun --nnodes=1 --nproc_per_node=3 --node_rank=0 --master_addr=${master_ip} --master_port=${master_port} train.py \
   --model depth_fusion_pvt \
   --dataset kitti_completion \
   --data_path Data \
@@ -25,8 +25,8 @@ torchrun --nnodes=1 --nproc_per_node=4 --node_rank=0 --master_addr=${master_ip} 
   --seed 123 \
   --optimizer adamw \
   --scheduler cosine \
-  --weight_decay 1e-2 \
-  --lr 7e-5 \
+  --weight_decay 1e-3 \
+  --lr 1e-3 \
   --batch_size 4 \
   --epochs 80 \
   --ckpt_dir ./checkpoints/crop_256x1216_lr_1e-3_adamW_tests \

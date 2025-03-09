@@ -57,6 +57,8 @@ class DepthFusionPVT(nn.Module):
         self.pvt = pvt_family.initialize_model(config_name="pvt_medium", patch_size=4, in_chans=128, num_stages=4)
 
         self.conv_decoder = ConvDecoder(in_channels=512, out_channels=48)
+
+        self.fusion_depth = ConvBlock(2,1, normalization=False, act=True)
         self.dyspn = Dynamic_deformablev2(iteration=6)
 
     def forward(self, rgb_left_aug, rgb_left, rgb_right, lidar, width):
@@ -65,11 +67,9 @@ class DepthFusionPVT(nn.Module):
         disparity = torch.clamp(disparity, min=2.0, max=192.0)
 
         disp2depth = disparity_to_depth(disparity, width)
-        #print(f'Disp Max: {disparity.max().item()}, Disp Min: {disparity.min().item()}')
-        #print(f'Depth Max: {disp2depth.max().item()}, Depth Min: {disp2depth.min().item()}')
 
         enc_rgb = self.rgb_conv(rgb_left_aug)
-        enc_disp = self.disp_conv(disparity)
+        enc_disp = self.disp_conv(disp2depth)
         enc_depth = self.depth_conv(lidar)
 
         enc_rgb_disp = self.rgb_disp_conv(torch.cat([enc_rgb, enc_disp], dim=1))
@@ -83,11 +83,10 @@ class DepthFusionPVT(nn.Module):
 
         mid_features = self.pvt(disp_feats2, depth_feats2)
 
-        residual_disp, residual_depth, confidence, guide = self.conv_decoder(mid_features, enc_rgb_disp, enc_rgb_depth, disp_feats, depth_feats, disp_feats2, depth_feats2)
+        residual_depth, confidence, guide = self.conv_decoder(mid_features, enc_rgb_disp, enc_rgb_depth, disp_feats, depth_feats, disp_feats2, depth_feats2)
 
-        enhanced_disp = disparity + residual_disp
-        enhanced_depth = disparity_to_depth(enhanced_disp, width) + residual_depth
         #enhanced_depth = disp2depth + residual_depth
+        enhanced_depth = self.fusion_depth(torch.cat([disp2depth, residual_depth], dim=1))
 
         final_pred = self.dyspn(enhanced_depth,
                                 guide[:, 0:24, :, :],
@@ -95,7 +94,7 @@ class DepthFusionPVT(nn.Module):
                                 confidence,
                                 lidar) 
 
-        return disp2depth, enhanced_depth, final_pred, residual_disp, residual_depth
+        return disp2depth, enhanced_depth, final_pred, residual_depth
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_ch, out_ch, downsample=False):
@@ -176,11 +175,12 @@ class ConvDecoder(nn.Module):
         self.stage5 = upsample_conv(64+256, 64, reduction=4)
         #self.stage6 = upsample_conv(64, 64, use_cbam=False)
 
-        self.conv_res_disp1 = ConvBlock(64+64, 64, normalization=False)
-        self.conv_res_disp_f1 = ConvBlock(64+64, 1, normalization=False)
+        self.conv_res_disp1 = ConvBlock(64+128, 64)
+        #self.conv_res_disp_f1 = ConvBlock(64+64, 1, normalization=False, act=False)
+        self.conv_res_disp_f1 = ConvBlock(64+64, 1, normalization=True, act=False)
 
-        self.conv_res_disp2 = ConvBlock(64+64,64, normalization=False)
-        self.conv_res_disp_f2 = ConvBlock(64+64, 1, normalization=False)
+        #self.conv_res_disp2 = ConvBlock(64+64,64, normalization=False)
+        #self.conv_res_disp_f2 = ConvBlock(64+64, 1, normalization=False)
 
         self.conv_confidence = ConvBlock(64+128, 64)
         self.conv_confidence_f = ConvBlock(64+128, 1)
@@ -219,11 +219,11 @@ class ConvDecoder(nn.Module):
         x = self.stage5(x) # H x W
         #x = self.stage6(x)
 
-        residual_depth = self.conv_res_disp1(self._concat(x, depth))
+        residual_depth = self.conv_res_disp1(self._concat(x, torch.cat([disparity, depth], dim=1)))
         residual_depth = self.conv_res_disp_f1(self._concat(residual_depth, enc_rgb_depth))
 
-        residual_disp = self.conv_res_disp2(self._concat(x, disparity))
-        residual_disp = self.conv_res_disp_f2(self._concat(residual_disp, enc_rgb_disp))
+        #residual_disp = self.conv_res_disp2(self._concat(x, disparity))
+        #residual_disp = self.conv_res_disp_f2(self._concat(residual_disp, enc_rgb_disp))
 
         confidence = self.conv_confidence(self._concat(x, torch.cat([depth, disparity], dim=1)))
         confidence = self.conv_confidence_f(self._concat(confidence, torch.cat([enc_rgb_depth, enc_rgb_disp], dim=1)))
@@ -232,58 +232,5 @@ class ConvDecoder(nn.Module):
         guide = self.conv_guide_f(self._concat(guide, torch.cat([enc_rgb_depth, enc_rgb_disp], dim=1)))
 
         #return 0.4*self.act(residual_disp)-0.2, 1.2*self.act(residual_depth)-0.6 
-        return residual_disp, residual_depth, confidence, guide
-
-
-class FlexibleDecoder(nn.Module):
-    def __init__(self, in_channels, out_channels, num_upsample=1, kernel_size=2, stride=2, padding=0):
-        super(FlexibleDecoder, self).__init__()
-        """
-        Flexible Decoder block with adjustable transpose convolution parameters for upsampling.
-        
-        Args:
-            in_channels (int): Number of input channels for the feature map.
-            out_channels (int): Number of output channels for the feature map.
-            num_upsample (int): Number of upsampling layers (for gradual upsampling).
-            kernel_size (int or tuple): Kernel size for transpose convolution.
-            stride (int or tuple): Stride for transpose convolution.
-            padding (int or tuple): Padding for transpose convolution.
-        """
-        self.num_upsample = num_upsample
-
-        # Initialize upsampling layers with conv transpose + batch norm + activation
-        if num_upsample > 0:
-            upsampling_layers = []
-            for _ in range(num_upsample):
-                upsampling_layers.append(
-                    nn.Sequential(
-                        ResidualBlock(in_channels, in_channels),
-                        nn.ConvTranspose2d(
-                            in_channels,
-                            out_channels,
-                            kernel_size=kernel_size,
-                            stride=stride,
-                            padding=padding
-                        ),
-                        nn.BatchNorm2d(out_channels),
-                        nn.ReLU(inplace=True)
-                    )
-                )
-                in_channels = out_channels  # Update in_channels for subsequent layers
-            self.upsampling = nn.Sequential(*upsampling_layers)
-        else:
-            self.upsampling = None  # No upsampling layers
-
-    def forward(self, x):
-        """
-        Forward pass through the decoder block.
-        
-        Args:
-            x (torch.Tensor): Input tensor of shape (B, C, H, W).
-            
-        Returns:
-            torch.Tensor: Decoded output tensor.
-        """
-        if self.upsampling:
-            x = self.upsampling(x)
-        return x
+        # 120.0*self.act(residual_depth)-60.0
+        return residual_depth, confidence, guide

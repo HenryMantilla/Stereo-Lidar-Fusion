@@ -1,4 +1,5 @@
 import os
+import random
 import torch
 import numpy as np
 
@@ -32,6 +33,8 @@ class KittiDepthCompletion(data.Dataset):
             transforms.ToDtype(torch.float32, scale=False)
         ])
 
+        self.normalize_val = transforms.Compose([transforms.ToImage(),transforms.ToDtype(torch.float32, scale=True)])
+
     def __len__(self):
         return len(self.sparse_filenames)
     
@@ -56,16 +59,19 @@ class KittiDepthCompletion(data.Dataset):
             gt = self.transform_train(gt_crop)
 
             rgb_left_aug = rgb_left_clean.clone()
+            rgb_left_aug = (rgb_left_aug - rgb_left_aug.min()) / (rgb_left_aug.max() - rgb_left_aug.min())
 
-            brightness = np.random.uniform(0.6, 1.2)
-            contrast = np.random.uniform(0.6, 1.2)
-            saturation = np.random.uniform(0.6, 1.2)
-            hue = np.random.uniform(-0.1, 0.1)
+            if random.random() < 0.5:
 
-            rgb_left_aug = transforms.functional.adjust_brightness(rgb_left_aug, brightness)
-            rgb_left_aug = transforms.functional.adjust_contrast(rgb_left_aug, contrast)
-            rgb_left_aug = transforms.functional.adjust_saturation(rgb_left_aug, saturation)
-            rgb_left_aug = transforms.functional.adjust_hue(rgb_left_aug, hue)
+                brightness = np.random.uniform(0.6, 1.2)
+                contrast = np.random.uniform(0.6, 1.2)
+                saturation = np.random.uniform(0.6, 1.2)
+                #hue = np.random.uniform(-0.1, 0.1)
+
+                rgb_left_aug = transforms.functional.adjust_brightness(rgb_left_aug, brightness)
+                rgb_left_aug = transforms.functional.adjust_contrast(rgb_left_aug, contrast)
+                rgb_left_aug = transforms.functional.adjust_saturation(rgb_left_aug, saturation)
+                #rgb_left_aug = transforms.functional.adjust_hue(rgb_left_aug, hue)
 
             rgb_left_aug = transforms.functional.normalize(rgb_left_aug, (0.485, 0.456, 0.406),
                                (0.229, 0.224, 0.225), inplace=True)
@@ -74,19 +80,24 @@ class KittiDepthCompletion(data.Dataset):
             #rgb_left_aug = transforms.functional.rotate(
             #    rgb_left_aug, angle=degree, interpolation=transforms.InterpolationMode.BILINEAR
             #)
-
-            #if random.random() > 0.5:
+            #flip = np.random.uniform(0.0, 1.0)
+            #if flip > 0.5:
             #    rgb_left_aug = transforms.functional.hflip(rgb_left_aug)
+            #    sparse = transforms.functional.hflip(sparse)
+            #    gt = transforms.functional.hflip(gt)
 
             return rgb_left_aug, rgb_left_clean, rgb_right_clean, sparse, gt, width
 
         else:
             rgb_left_clean = self.transform_val(rgb_left_crop)
             rgb_right_clean = self.transform_val(rgb_right_crop)
+            
             sparse = self.transform_val(sparse_crop)
             gt = self.transform_val(gt_crop)
 
-            rgb_left_aug = rgb_left_clean
+            rgb_left_aug = rgb_left_clean.clone()
+            rgb_left_aug = (rgb_left_aug - rgb_left_aug.min()) / (rgb_left_aug.max() - rgb_left_aug.min())
+            #print(rgb_left_aug.max(), rgb_left_aug.min())
             rgb_left_aug = transforms.functional.normalize(rgb_left_aug, (0.485, 0.456, 0.406),
                                (0.229, 0.224, 0.225), inplace=True)
 
