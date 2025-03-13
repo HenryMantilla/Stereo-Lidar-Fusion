@@ -17,7 +17,7 @@ from tqdm import tqdm
 from loguru import logger
 from datasets import __datasets__, get_dataloader
 from models import __models__
-from utils import get_lr_scheduler, get_optimizer, save_checkpoint, load_checkpoint, MetricEvaluator
+from utils import get_lr_scheduler, get_optimizer, save_checkpoint, load_checkpoint, MetricEvaluator, depth_to_disparity_train
 
 def parse_args():
 
@@ -54,7 +54,7 @@ def parse_args():
     parser.add_argument('--corr_radius', type=int, default=4, help="width of the correlation pyramid")
     parser.add_argument('--n_downsample', type=int, default=2, help="resolution of the disparity field (1/2^K)")
     parser.add_argument('--n_gru_layers', type=int, default=3, help="number of hidden GRU levels")
-    parser.add_argument('--max_disp', type=int, default=192, help="max disp range") #768 default from IGEV++
+    parser.add_argument('--max_disp', type=int, default=768, help="max disp range") #768 default from IGEV++ 192 for IGEV
     parser.add_argument('--s_disp_range', type=int, default=48, help="max disp of small disparity-range geometry encoding volume")
     parser.add_argument('--m_disp_range', type=int, default=96, help="max disp of medium disparity-range geometry encoding volume")
     parser.add_argument('--l_disp_range', type=int, default=192, help="max disp of large disparity-range geometry encoding volume")
@@ -79,7 +79,7 @@ def cleanup():
     if dist.is_initialized():
         dist.destroy_process_group()
 
-def log_predictions(rank, rgb_left, rgb_right, groundtruth, stereo, init_pred, final_pred, res_disp, res_depth, caption="Predictions"):
+def log_predictions(rank, rgb_left, rgb_right, gt_depth, gt_disp, stereo, init_pred, final_pred, res_disp, res_depth, caption="Predictions"):
 
     if rank != 0:
         return
@@ -88,7 +88,8 @@ def log_predictions(rank, rgb_left, rgb_right, groundtruth, stereo, init_pred, f
     
     rgb_left_sample = rgb_left[:num_samples].detach().cpu()
     rgb_right_sample = rgb_right[:num_samples].detach().cpu()
-    gt_sample = groundtruth[:num_samples].detach().cpu()
+    gt_sample = gt_depth[:num_samples].detach().cpu()
+    gt_disp_sample = gt_disp[:num_samples].detach().cpu()
     stereo_sample = stereo[:num_samples].detach().cpu()
     init_sample = init_pred[:num_samples].detach().cpu()
     final_sample = final_pred[:num_samples].detach().cpu()
@@ -96,6 +97,7 @@ def log_predictions(rank, rgb_left, rgb_right, groundtruth, stereo, init_pred, f
     res_depth_sample = res_depth[:num_samples].detach().cpu()
 
     gt_sample = apply_colormap(gt_sample, colormap='magma')
+    gt_disp_sample = apply_colormap(gt_disp_sample, colormap='magma')
     stereo_sample = apply_colormap(stereo_sample, colormap='magma')
     init_sample = apply_colormap(init_sample, colormap='magma')
     final_sample = apply_colormap(final_sample, colormap='magma')
@@ -105,6 +107,7 @@ def log_predictions(rank, rgb_left, rgb_right, groundtruth, stereo, init_pred, f
     rgb_left_grid = make_grid(rgb_left_sample.unsqueeze(0))
     rgb_right_grid = make_grid(rgb_right_sample.unsqueeze(0))
     gt_grid = make_grid(gt_sample.unsqueeze(0))
+    gt_disp_grid = make_grid(gt_disp_sample.unsqueeze(0))
     stereo_grid = make_grid(stereo_sample.unsqueeze(0))
     init_grid = make_grid(init_sample.unsqueeze(0))
     final_grid = make_grid(final_sample.unsqueeze(0))
@@ -115,6 +118,7 @@ def log_predictions(rank, rgb_left, rgb_right, groundtruth, stereo, init_pred, f
         "Left Image": wandb.Image(rgb_left_grid, caption=caption),
         "Right Image": wandb.Image(rgb_right_grid, caption=caption),
         "Groundtruth Depth": wandb.Image(gt_grid, caption=caption),
+        "Groundtruth Disparity": wandb.Image(gt_disp_grid, caption=caption),
         "Stereo Inputs": wandb.Image(stereo_grid, caption=caption),
         "Init pred": wandb.Image(init_grid, caption=caption),
         "Final pred": wandb.Image(final_grid, caption=caption),
@@ -126,7 +130,7 @@ def apply_colormap(image_tensor, colormap='plasma'):
     if image_tensor.dim() == 4:
         image_tensor = image_tensor.squeeze(0).squeeze(0)
 
-    image_np = image_tensor.numpy()
+    image_np = image_tensor.float().cpu().numpy()
     normalized_image = (image_np - np.min(image_np)) / (np.max(image_np) - np.min(image_np) + 1e-6)
 
     colormap_fn = cm.get_cmap(colormap)
@@ -207,18 +211,16 @@ def train(args):
     else:
         os.environ["WANDB_MODE"] = "offline"
 
-    train_dataloader, _ = get_dataloader(args, train=True, distributed=(world_size > 1), rank=rank, world_size=world_size)
+    train_dataloader, len_train = get_dataloader(args, train=True, distributed=(world_size > 1), rank=rank, world_size=world_size)
     val_dataloader, _ = get_dataloader(args, train=False, distributed=(world_size > 1), rank=rank, world_size=world_size)
 
     model = __models__[args.model](args)
 
-    #trainable_layers = ["stereo_matching.cnet", "stereo_matching.feature", "stereo_matching.cost_agg"]
+    #trainable_layers = ["cnet", "stem", "cost_agg", "context"] #"feature"
 
     for name, param in model.named_parameters():
-        if "dyspn" in name:
-            param.requires_grad = False
         if "stereo_matching" in name:
-            param.requires_grad = False
+            param.requires_grad = True
             #if any(layer in name for layer in trainable_layers):
             #    param.requires_grad = True
             #else:
@@ -232,7 +234,7 @@ def train(args):
     model = DDP(model, device_ids=[rank], find_unused_parameters=True, gradient_as_bucket_view=True) 
 
     optimizer = get_optimizer(args, model)
-    lr_scheduler = get_lr_scheduler(args, optimizer)
+    lr_scheduler = get_lr_scheduler(args, optimizer, len_train)
 
     criterion_l1 = nn.L1Loss(reduction='mean')
     criterion_l2 = nn.MSELoss(reduction='mean')
@@ -277,12 +279,11 @@ def train(args):
             train_dataloader.sampler.set_epoch(epoch_idx)
 
         model.train()
-        model.module.stereo_matching.eval()
+        #model.module.stereo_matching.eval()
         progress_bar = tqdm(enumerate(train_dataloader), 
-                            total=len(train_dataloader), 
+                            total=len(train_dataloader),
                             desc=f"Epoch {epoch_idx + 1}",
                             disable=(rank != 0))
-        
         epoch_loss = 0.0
 
         for batch_idx, batch_sample in progress_bar:
@@ -294,10 +295,8 @@ def train(args):
                 sparse = input_padding(sparse)
 
             optimizer.zero_grad()
-            stereo_depth, init_pred, final_pred, r_depth = model(rgb_aug, rgb_left, rgb_right, sparse, width)
 
-            res_min = r_depth.min().item()
-            res_max = r_depth.max().item()
+            stereo_depth, init_pred, final_pred, r_depth, r_disp = model(rgb_aug, rgb_left, rgb_right, sparse, width)
 
             if args.model == 'depth_fusion_swin':
                 rgb = rgb[:, :, :256, :1216]
@@ -306,10 +305,14 @@ def train(args):
                 final_pred = final_pred[:, :, :256, :1216]
 
             mask = (groundtruth > 1e-8)
+            gt_disp = depth_to_disparity_train(groundtruth, width)
+            mask_disp = gt_disp > 1e-8
 
-            #l_smooth = smoothness_loss(init_pred)
-            loss = criterion_l2(init_pred[mask], groundtruth[mask]) + criterion_l1(init_pred[mask], groundtruth[mask]) 
-            #loss = criterion_l2(final_pred[mask], groundtruth[mask]) + criterion_l1(final_pred[mask], groundtruth[mask]) + loss_residual + 0.2 * l_smooth
+            loss_disp = criterion_l2(stereo_depth[mask_disp], gt_disp[mask_disp]) + criterion_l1(stereo_depth[mask_disp], gt_disp[mask_disp])
+            #loss_disp = criterion_l2(stereo_depth[mask], groundtruth[mask]) + criterion_l1(stereo_depth[mask], groundtruth[mask])
+            loss_init = criterion_l2(init_pred[mask], groundtruth[mask]) + criterion_l1(init_pred[mask], groundtruth[mask]) 
+            loss_final = criterion_l2(final_pred[mask], groundtruth[mask]) + criterion_l1(final_pred[mask], groundtruth[mask])
+            loss = 0.6 * loss_final + 0.8 * loss_init + 0.8 * loss_disp #+ 0.3 * edge_aware_smoothness(rgb_left, final_pred)
             loss.backward()
 
             #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=15.0, norm_type=2.0, foreach=None)
@@ -321,17 +324,17 @@ def train(args):
 
             epoch_loss += reduced_loss.item()
 
+            #if batch_idx % 200 == 0 and batch_idx != 0:
+            #   metrics_eval = validate(rank, model, val_dataloader, metric_evaluator, args)         
+
             if rank == 0:
                 progress_bar.set_postfix(loss=reduced_loss.item())
-                #wandb.watch(model.module.conv_decoder, log="parameters", log_freq=50)
-                wandb.log({
-                    "residual_min": res_min,
-                    "residual_max": res_max
-                })
                 
                 wandb.log({
                     "batch_loss": reduced_loss.item(),
-                    "prediction_loss": loss.item(),
+                    "disparity to depth loss": loss_disp.item(),
+                    "init pred loss": loss_init.item(),
+                    "final pred loss": loss_final.item(),
                     "learning_rate": optimizer.param_groups[0]['lr']
                 })
                 
@@ -342,37 +345,38 @@ def train(args):
                         total_norm += param_norm.item() ** 2
                 total_norm = total_norm ** 0.5
                 
-                
-                if rank == 0:
-                    wandb.log({"grad_norm": total_norm})
-                    if batch_idx % 1000 == 0 and rank == 0:
-                        log_predictions(rank, 
-                                        rgb_left,
-                                        rgb_right,
-                                        groundtruth, 
-                                        stereo_depth, 
-                                        init_pred, 
-                                        final_pred, 
-                                        r_depth, 
-                                        r_depth,
-                                        caption="Train Predictions")
-                        """
-                        print(f"Image RGB Min {rgb_aug.min()} Max {rgb_aug.max()}")
-                        print(f"Image Left Min {rgb_left.min()} Max {rgb_left.max()}")
-                        print(f"Image Right Min {rgb_right.min()} Max {rgb_right.max()}")
-                        print(f"Sparse Min {sparse.min()} Max {sparse.max()}")
-                        print(f"Groundtruth Min {groundtruth.min()} Max {groundtruth.max()}")
-                        print(f"Stereo Depth Min {stereo_depth.min()} Max {stereo_depth.max()}")
-                        print(f"Init Pred Min {init_pred.min()} Max {init_pred.max()}")
-                        print(f"Final Pred Min {final_pred.min()} Max {final_pred.max()}")
-                        print(f"Residual Depth Min {r_depth.min()} Max {r_depth.max()}")
-                        """
+                wandb.log({"grad_norm": total_norm})
+                if batch_idx % 1500 == 0 and rank == 0:
+                    """                    
+                    print(f"Image RGB Min {rgb_aug.min()} Max {rgb_aug.max()}")
+                    print(f"Image Left Min {rgb_left.min()} Max {rgb_left.max()}")
+                    print(f"Image Right Min {rgb_right.min()} Max {rgb_right.max()}")
+                    print(f"Sparse Min {sparse.min()} Max {sparse.max()}")
+                    print(f"Groundtruth Min {groundtruth.min()} Max {groundtruth.max()}")
+                    print(f"Groundtruth Disparity Min {gt_disp.min()} Max {gt_disp.max()}")
+                    print(f"Stereo Depth Min {stereo_depth.min()} Max {stereo_depth.max()}")
+                    print(f"Init Pred Min {init_pred.min()} Max {init_pred.max()}")
+                    print(f"Final Pred Min {final_pred.min()} Max {final_pred.max()}")
+                    print(f"Residual Depth Min {r_depth.min()} Max {r_depth.max()}")
+                    print(f"Residual Disparity Min {r_disp.min()} Max {r_disp.max()}")
+                    """
+                    log_predictions(rank,
+                                    rgb_left,
+                                    rgb_right,
+                                    groundtruth,
+                                    gt_disp,
+                                    stereo_depth,
+                                    init_pred,
+                                    final_pred,
+                                    r_disp,
+                                    r_depth,
+                                    caption="Train Predictions")
 
 
         #if isinstance(lr_scheduler, optim.lr_scheduler.CosineAnnealingLR):
         #    lr_scheduler.step()
 
-        lr_scheduler.step()
+            lr_scheduler.step()
 
         epoch_loss_tensor = torch.tensor(epoch_loss, device='cuda')
         dist.all_reduce(epoch_loss_tensor)
@@ -418,7 +422,8 @@ def validate(rank, model, val_loader, metric_evaluator, args):
                 stereo = input_padding(stereo)
                 sparse = input_padding(sparse)
 
-            stereo_depth, init_pred, final_pred, r_depth = model(rgb_aug, rgb_left, rgb_right, sparse, width)
+            stereo_depth, init_pred, final_pred, r_depth, r_disp = model(rgb_aug, rgb_left, rgb_right, sparse, width)
+            gt_disp = depth_to_disparity_train(groundtruth, width)
 
             if args.model == 'depth_fusion_swin':
                 stereo = stereo[:, :, :256, :1216]
@@ -427,7 +432,7 @@ def validate(rank, model, val_loader, metric_evaluator, args):
                 confidence = confidence[:, :, :256, :1216]
 
             # Evaluate metrics for the current batch
-            batch_metrics = metric_evaluator.evaluate_metrics(init_pred, groundtruth) 
+            batch_metrics = metric_evaluator.evaluate_metrics(final_pred, groundtruth) 
             batch_size = groundtruth.size(0)  
 
             for metric, value in batch_metrics.items():
@@ -439,18 +444,8 @@ def validate(rank, model, val_loader, metric_evaluator, args):
             progress_bar.set_postfix({metric: f"{value:.4f}" for metric, value in avg_metrics.items()})
 
             
-            if batch_idx==0 and rank == 0:
-                """
-                wandb.log({"residual_hist": wandb.Histogram(r_depth.cpu().numpy().flatten()),
-                           "rgb_aug": wandb.Image(rgb_aug),
-                           "rgb_left": wandb.Image(rgb_left),
-                           "rgb_right": wandb.Image(rgb_right),
-                           "sparse": wandb.Image(sparse),
-                           "groundtruth": wandb.Image(groundtruth),
-                           "stereo_depth": wandb.Image(stereo_depth),
-                           "init_pred": wandb.Image(init_pred),
-                           "final_pred": wandb.Image(final_pred)})
-                
+            if batch_idx == 0 and rank == 0:
+                """                
                 print(f"Image RGB Min {rgb_aug.min()} Max {rgb_aug.max()}")
                 print(f"Image Left Min {rgb_left.min()} Max {rgb_left.max()}")
                 print(f"Image Right Min {rgb_right.min()} Max {rgb_right.max()}")
@@ -466,10 +461,11 @@ def validate(rank, model, val_loader, metric_evaluator, args):
                                 rgb_left,   
                                 rgb_right, 
                                 groundtruth, 
+                                gt_disp,
                                 stereo_depth, 
                                 init_pred, 
                                 final_pred, 
-                                r_depth,
+                                r_disp,
                                 r_depth, 
                                 caption="Validation Predictions")
     # Distributed reduction if applicable

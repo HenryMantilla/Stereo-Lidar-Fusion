@@ -67,7 +67,7 @@ def get_optimizer(args, model):
 
     return optimizer
 
-def get_lr_scheduler(args, optimizer):
+def get_lr_scheduler(args, optimizer, len_dataset):
     lr_schedulers = {
         'multi_step': optim.lr_scheduler.MultiStepLR,
         'cosine': optim.lr_scheduler.CosineAnnealingLR, #t_max, eta_min
@@ -77,14 +77,17 @@ def get_lr_scheduler(args, optimizer):
     if args.scheduler not in lr_schedulers:
         raise ValueError(f"Unknown optimizer scheduler {args.scheduler}")
 
+    steps_per_epoch = len_dataset // args.batch_size
+    total_steps = args.epochs * steps_per_epoch
+
     lr_schedulers_params = {
         'multi_step': {
-            'milestones': [50, 60, 70, 80, 90],
-            'gamma': 0.5
+            'milestones': [2, 4, 8, 12],
+            'gamma': 0.7
         },
         'cosine': {
-            'T_max': args.epochs, 
-            'eta_min': 1e-5,  
+            'T_max': total_steps, 
+            'eta_min': 1e-7,  
         },
         'cyclic': {
             'base_lr': 0.0001, 
