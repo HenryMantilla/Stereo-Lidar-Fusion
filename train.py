@@ -376,7 +376,7 @@ def train(args):
         #if isinstance(lr_scheduler, optim.lr_scheduler.CosineAnnealingLR):
         #    lr_scheduler.step()
 
-            lr_scheduler.step()
+        lr_scheduler.step()
 
         epoch_loss_tensor = torch.tensor(epoch_loss, device='cuda')
         dist.all_reduce(epoch_loss_tensor)

@@ -54,7 +54,7 @@ class DepthFusionPVT(nn.Module):
                                                 ResidualBlock(in_ch=128, out_ch=128, downsample=False))
         # PVT Backbone
         pvt_family = PvtFamily()
-        self.pvt = pvt_family.initialize_model(config_name="pvt_small", patch_size=4, in_chans=128, num_stages=4)
+        self.pvt = pvt_family.initialize_model(config_name="pvt_small", patch_size=2, in_chans=128, num_stages=4)
 
         self.conv_decoder = ConvDecoder(in_channels=512, out_channels=48)
 
