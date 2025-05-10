@@ -12,7 +12,7 @@ class MetricEvaluator:
 
     def evaluate_metrics(self, pred, groundtruth):
         
-        valid_mask = (groundtruth > 1e-8) 
+        valid_mask = (groundtruth > 1e-8)
         # Apply mask
         pred_valid = pred[valid_mask]
         groundtruth_valid = groundtruth[valid_mask]

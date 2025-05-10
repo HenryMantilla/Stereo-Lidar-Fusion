@@ -42,8 +42,8 @@ class KittiDepthCompletion(data.Dataset):
 
         rgb_left = frame_utils.read_rgb(self.rgb_left_filenames[idx])     
         rgb_right = frame_utils.read_rgb(self.rgb_right_filenames[idx])   
-        sparse_disp = frame_utils.read_depth(self.sparse_filenames[idx]) #frame_utils.depth_to_disparity(frame_utils.read_depth(self.sparse_filenames[idx]))
-        gt_disp = frame_utils.read_depth(self.gt_filenames[idx]) #frame_utils.depth_to_disparity(frame_utils.read_depth(self.gt_filenames[idx]))
+        sparse_disp = frame_utils.read_depth(self.sparse_filenames[idx]) 
+        gt_disp = frame_utils.read_depth(self.gt_filenames[idx])
 
         width = gt_disp.shape[1]
 
@@ -76,7 +76,6 @@ class KittiDepthCompletion(data.Dataset):
             rgb_left_aug = transforms.functional.normalize(rgb_left_aug, (0.485, 0.456, 0.406),
                                (0.229, 0.224, 0.225), inplace=True)
 
-            #degree = float(np.random.uniform(-5.0, 5.0))
             #rgb_left_aug = transforms.functional.rotate(
             #    rgb_left_aug, angle=degree, interpolation=transforms.InterpolationMode.BILINEAR
             #)
@@ -97,7 +96,6 @@ class KittiDepthCompletion(data.Dataset):
 
             rgb_left_aug = rgb_left_clean.clone()
             rgb_left_aug = (rgb_left_aug - rgb_left_aug.min()) / (rgb_left_aug.max() - rgb_left_aug.min())
-            #print(rgb_left_aug.max(), rgb_left_aug.min())
             rgb_left_aug = transforms.functional.normalize(rgb_left_aug, (0.485, 0.456, 0.406),
                                (0.229, 0.224, 0.225), inplace=True)
 

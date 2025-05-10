@@ -1,4 +1,5 @@
 import os
+import math
 
 import torch
 import torch.optim as optim
@@ -67,7 +68,7 @@ def get_optimizer(args, model):
 
     return optimizer
 
-def get_lr_scheduler(args, optimizer, len_dataset):
+def get_lr_scheduler(args, optimizer, len_train):
     lr_schedulers = {
         'multi_step': optim.lr_scheduler.MultiStepLR,
         'cosine': optim.lr_scheduler.CosineAnnealingLR, #t_max, eta_min
@@ -77,8 +78,8 @@ def get_lr_scheduler(args, optimizer, len_dataset):
     if args.scheduler not in lr_schedulers:
         raise ValueError(f"Unknown optimizer scheduler {args.scheduler}")
 
-    steps_per_epoch = len_dataset // args.batch_size
-    total_steps = args.epochs * steps_per_epoch
+    
+    steps_per_epoch = math.ceil(len_train / args.batch_size)
 
     lr_schedulers_params = {
         'multi_step': {
@@ -86,8 +87,8 @@ def get_lr_scheduler(args, optimizer, len_dataset):
             'gamma': 0.7
         },
         'cosine': {
-            'T_max': total_steps, 
-            'eta_min': 1e-7,  
+            'T_max': int(steps_per_epoch * args.epochs), 
+            'eta_min': 1e-10,  
         },
         'cyclic': {
             'base_lr': 0.0001, 

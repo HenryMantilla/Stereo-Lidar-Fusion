@@ -271,7 +271,7 @@ class Dynamic_deformablev2(nn.Module):
     def __init__(self, iteration=6):
         super(Dynamic_deformablev2, self).__init__()
         self.prop_time = iteration
-        self.ch_g = 8
+        self.ch_g = 8 
         self.ch_f = 1
         self.k_g = 3
         self.k_f = 3
@@ -378,7 +378,6 @@ class Dynamic_deformablev2(nn.Module):
     def forward(self, feat_init, guidance, dynamic, confidence, feat_fix):
         assert self.ch_f == feat_init.shape[1]
         confidence = torch.sigmoid(confidence)
-        # dynamic = torch.sigmoid(dynamic)
         dynamic=torch.softmax(einops.rearrange(dynamic,'b (n c) h w -> b n c h w',n=self.prop_time),dim=2)
         dynamic = einops.rearrange(dynamic, 'b n c h w -> b (n c) h w')
         mask_fix = feat_fix.sign()

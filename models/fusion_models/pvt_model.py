@@ -2,8 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from models.igev_plus_plus.core.igev_stereo import IGEVStereo
-#from models.igev.core.igev_stereo import IGEVStereo
-from utils.frame_utils import disparity_to_depth
+from utils.frame_utils import disparity_to_depth, depth_to_disparity_train
 from models.encoders.PVT import PvtFamily
 from models.modules import CBAM, ConvBlock
 from models.dyspn import Dynamic_deformablev2
@@ -57,16 +56,12 @@ class DepthFusionPVT(nn.Module):
         self.pvt = pvt_family.initialize_model(config_name="pvt_small", patch_size=2, in_chans=128, num_stages=4)
 
         self.conv_decoder = ConvDecoder(in_channels=512, out_channels=48)
-
-        #self.fusion_depth = ConvBlock(2,1, normalization=False, act=True)
         self.dyspn = Dynamic_deformablev2(iteration=6)
 
     def forward(self, rgb_left_aug, rgb_left, rgb_right, lidar, width):
 
         disparity = self.stereo_matching(rgb_left, rgb_right, iters=16, test_mode=True)
-        disparity = torch.clamp(disparity, min=2.0, max=192.0)
-
-        #disp2depth = disparity_to_depth(disparity, width) #the best rmse is with this commented and use disparity domain
+        #disparity = torch.clamp(disparity, min=2.0, max=192.0) 
 
         enc_rgb = self.rgb_conv(rgb_left_aug)
         enc_disp = self.disp_conv(disparity)
@@ -75,6 +70,8 @@ class DepthFusionPVT(nn.Module):
         enc_rgb_disp = self.rgb_disp_conv(torch.cat([enc_rgb, enc_disp], dim=1))
         enc_rgb_depth = self.rgb_depth_conv(torch.cat([enc_rgb, enc_depth], dim=1))
 
+        del enc_disp, enc_depth, enc_rgb
+
         disp_feats = self.resnet_blks_disp(enc_rgb_disp)
         depth_feats = self.resnet_blks_depth(enc_rgb_depth)
 
@@ -82,10 +79,12 @@ class DepthFusionPVT(nn.Module):
         depth_feats2 = self.resnet_blks_depth2(depth_feats)
 
         mid_features = self.pvt(disp_feats2, depth_feats2)
+        #mid_features = self.pvt(depth_feats2, disp_feats2) new train
 
         residual_depth, residual_disp, confidence, guide = self.conv_decoder(mid_features, enc_rgb_disp, enc_rgb_depth, disp_feats, depth_feats, disp_feats2, depth_feats2)
 
-        #enhanced_depth = disp2depth + residual_depth
+        del mid_features, enc_rgb_disp, enc_rgb_depth, disp_feats, depth_feats, disp_feats2, depth_feats2
+
         enhanced_depth = disparity_to_depth(disparity+residual_disp, width) + residual_depth
 
         final_pred = self.dyspn(enhanced_depth,
@@ -94,19 +93,11 @@ class DepthFusionPVT(nn.Module):
                                 confidence,
                                 lidar) 
 
-        #return disp2depth, enhanced_depth, final_pred, residual_depth
         return disparity, enhanced_depth, final_pred, residual_depth, residual_disp
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_ch, out_ch, downsample=False):
         super().__init__()
-        """
-        Residual block with optional 1x1 convolution for channel matching.
-        
-        Args:
-            in_channels (int): Number of input channels.
-            out_channels (int): Number of output channels.
-        """
 
         stride = 2 if downsample else 1
         
@@ -127,15 +118,7 @@ class ResidualBlock(nn.Module):
             self.shortcut = nn.Identity()
 
     def forward(self, x):
-        """
-        Forward pass for the residual block.
-        
-        Args:
-            x (torch.Tensor): Input tensor of shape (B, C, H, W).
-            
-        Returns:
-            torch.Tensor: Output tensor of shape (B, out_channels, H, W).
-        """
+
         identity = self.shortcut(x)  # Adjust channels if necessary
 
         out = self.conv1(x)
@@ -213,7 +196,6 @@ class ConvDecoder(nn.Module):
         x = x = torch.cat([x, feats[0]], dim=1) 
         x = self.stage4(x) # H/2 x W/2
 
-
         x = self._concat(torch.cat([disparity_2, depth_2], dim=1), x)
         x = self.stage5(x) # H x W
 
@@ -230,7 +212,31 @@ class ConvDecoder(nn.Module):
         guide = self.conv_guide(self._concat(x, torch.cat([depth, disparity], dim=1)))
         guide = self.conv_guide_f(self._concat(guide, torch.cat([enc_rgb_depth, enc_rgb_disp], dim=1)))
 
-        #return 0.4*self.act(residual_disp)-0.2, 1.2*self.act(residual_depth)-0.6 
         res_disp = (self.act(residual_disp) - 0.5) * 2.0 * 0.6
-        res_depth = (self.act(residual_depth) - 0.5) * 2.0 * 2.0 #self.args.disp_to_depth_convert_depth_range
+        res_depth = (self.act(residual_depth) - 0.5) * 2.0 * 2.0
+
         return res_depth, res_disp, confidence, guide
+
+
+class Upsampling(nn.Module):
+    def __init__(self, in_ch, mid_ch, out_ch, up_factor, modify_ch=False):
+        super().__init__()
+
+        self.use_conv_for_channel = modify_ch
+
+        if modify_ch:
+            self.prediction_head = nn.Sequential(
+                nn.Conv2d(in_ch, mid_ch, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid_ch, out_ch, kernel_size=3, padding=1)
+            )
+        else:
+            self.prediction_head = nn.Identity() 
+
+        self.pixel_shuffle = nn.PixelShuffle(upscale_factor=up_factor)
+
+    def forward(self, x):
+        modified_channels = self.prediction_head(x)
+        up_prediction = self.pixel_shuffle(modified_channels)
+
+        return up_prediction

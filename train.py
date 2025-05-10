@@ -1,4 +1,5 @@
 import os
+import random
 import argparse
 import numpy as np
 import wandb
@@ -17,6 +18,7 @@ from tqdm import tqdm
 from loguru import logger
 from datasets import __datasets__, get_dataloader
 from models import __models__
+from utils.loss import GradientLoss, MaskedL1L2Loss
 from utils import get_lr_scheduler, get_optimizer, save_checkpoint, load_checkpoint, MetricEvaluator, depth_to_disparity_train
 
 def parse_args():
@@ -96,13 +98,13 @@ def log_predictions(rank, rgb_left, rgb_right, gt_depth, gt_disp, stereo, init_p
     res_disp_sample = res_disp[:num_samples].detach().cpu()
     res_depth_sample = res_depth[:num_samples].detach().cpu()
 
-    gt_sample = apply_colormap(gt_sample, colormap='magma')
-    gt_disp_sample = apply_colormap(gt_disp_sample, colormap='magma')
-    stereo_sample = apply_colormap(stereo_sample, colormap='magma')
-    init_sample = apply_colormap(init_sample, colormap='magma')
-    final_sample = apply_colormap(final_sample, colormap='magma')
-    res_disp_sample = apply_colormap(res_disp_sample, colormap='magma')
-    res_depth_sample = apply_colormap(res_depth_sample, colormap='magma')
+    gt_sample = apply_colormap(gt_sample, colormap='Spectral')
+    gt_disp_sample = apply_colormap(gt_disp_sample, colormap='Spectral')
+    stereo_sample = apply_colormap(stereo_sample, colormap='Spectral')
+    init_sample = apply_colormap(init_sample, colormap='Spectral')
+    final_sample = apply_colormap(final_sample, colormap='Spectral')
+    res_disp_sample = apply_colormap(res_disp_sample, colormap='Spectral')
+    res_depth_sample = apply_colormap(res_depth_sample, colormap='Spectral')
 
     rgb_left_grid = make_grid(rgb_left_sample.unsqueeze(0))
     rgb_right_grid = make_grid(rgb_right_sample.unsqueeze(0))
@@ -141,57 +143,6 @@ def apply_colormap(image_tensor, colormap='plasma'):
 
     return color_image.unsqueeze(0).float()
 
-def input_padding(x, target_width=1280):
-
-    _,_,_, W = x.shape
-
-    pad_w = target_width - W
-    pad_h = 0  
-    x_padded = F.pad(x, (0, pad_w, 0, pad_h))  
-
-    return x_padded
-
-
-def edge_aware_smoothness(rgb, depth):
-    def gradient_y(img):
-        kernel = torch.tensor(
-            [[1, 2, 1], [0, 0, 0], [-1, -2, -1]], dtype=img.dtype, device=img.device
-        ).view(1, 1, 3, 3)  
-        kernel = kernel.repeat(img.shape[1], 1, 1, 1) 
-        return F.conv2d(img, kernel, padding=1)
-
-    def gradient_x(img):
-        kernel = torch.tensor(
-            [[1, 0, -1], [2, 0, -2], [1, 0, -1]], dtype=img.dtype, device=img.device
-        ).view(1, 1, 3, 3)  
-        kernel = kernel.repeat(img.shape[1], 1, 1, 1)  
-        return F.conv2d(img, kernel, padding=1)
-
-    depth_gradients_x = gradient_x(depth)
-    depth_gradients_y = gradient_y(depth)
-
-    rgb_gradients_x = torch.mean(torch.stack([gradient_x(rgb[:, i:i+1, :, :]) for i in range(3)]), dim=0)
-    rgb_gradients_y = torch.mean(torch.stack([gradient_y(rgb[:, i:i+1, :, :]) for i in range(3)]), dim=0)
-
-    weights_x = torch.exp(-torch.abs(rgb_gradients_x))
-    weights_y = torch.exp(-torch.abs(rgb_gradients_y))
-
-    # Compute edge-aware smoothness
-    smoothness_x = torch.abs(depth_gradients_x) * weights_x
-    smoothness_y = torch.abs(depth_gradients_y) * weights_y
-
-    return torch.mean(smoothness_x) + torch.mean(smoothness_y)
-
-def smoothness_loss(residual):
-    """
-    Compute a simple total variation loss over the residual.
-    Assumes residual shape is (B, 1, H, W).
-    """
-    grad_x = torch.abs(residual[:, :, :, 1:] - residual[:, :, :, :-1])
-    grad_y = torch.abs(residual[:, :, 1:, :] - residual[:, :, :-1, :])
-    return grad_x.mean() + grad_y.mean()
-
-
 def train(args):
 
     rank, world_size = setup_distributed()
@@ -216,15 +167,9 @@ def train(args):
 
     model = __models__[args.model](args)
 
-    #trainable_layers = ["cnet", "stem", "cost_agg", "context"] #"feature"
-
     for name, param in model.named_parameters():
         if "stereo_matching" in name:
             param.requires_grad = True
-            #if any(layer in name for layer in trainable_layers):
-            #    param.requires_grad = True
-            #else:
-            #    param.requires_grad = False
         else:
             param.requires_grad = True
 
@@ -236,8 +181,8 @@ def train(args):
     optimizer = get_optimizer(args, model)
     lr_scheduler = get_lr_scheduler(args, optimizer, len_train)
 
-    criterion_l1 = nn.L1Loss(reduction='mean')
-    criterion_l2 = nn.MSELoss(reduction='mean')
+    criterion_l1l2 = MaskedL1L2Loss(reduction='mean')
+    criterion_grads = GradientLoss(scales=4)
 
     metrics = ["mae_metric", "imae_metric", "rmse_metric", "irmse_metric"]
     metric_evaluator = MetricEvaluator(metrics)
@@ -265,13 +210,11 @@ def train(args):
     if rank == 0:
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total_params_millions = total_params / 1e6
-        logger.info(f"Model has {total_params_millions:.2f} million parameters.")
+        logger.info(f"Model has {total_params_millions:.3f} million parameters.")
         logger.info(f"Using {args.optimizer} optimizer to train the {args.model} model.")
         logger.info(f"Using {args.scheduler} learning rate scheduler for the {args.optimizer} optimizer.")
         logger.info(f"Starting training for {args.model} model on {args.dataset} dataset.")
         logger.info(f"Starting epoch {start_epoch}")
-
-    #torch.autograd.set_detect_anomaly(True)
 
     for epoch_idx in range(start_epoch, args.epochs):
         
@@ -289,33 +232,21 @@ def train(args):
         for batch_idx, batch_sample in progress_bar:
 
             rgb_aug, rgb_left, rgb_right, sparse, groundtruth, width = [x.cuda(non_blocking=True) for x in batch_sample]
-            if args.model == 'depth_fusion_swin':
-                rgb = input_padding(rgb)
-                stereo = input_padding(stereo)
-                sparse = input_padding(sparse)
 
             optimizer.zero_grad()
 
             stereo_depth, init_pred, final_pred, r_depth, r_disp = model(rgb_aug, rgb_left, rgb_right, sparse, width)
 
-            if args.model == 'depth_fusion_swin':
-                rgb = rgb[:, :, :256, :1216]
-                #confidence = confidence[:, :, :256, :1216]
-                init_pred = init_pred[:, :, :256, :1216]
-                final_pred = final_pred[:, :, :256, :1216]
-
             mask = (groundtruth > 1e-8)
             gt_disp = depth_to_disparity_train(groundtruth, width)
             mask_disp = gt_disp > 1e-8
 
-            loss_disp = criterion_l2(stereo_depth[mask_disp], gt_disp[mask_disp]) + criterion_l1(stereo_depth[mask_disp], gt_disp[mask_disp])
-            #loss_disp = criterion_l2(stereo_depth[mask], groundtruth[mask]) + criterion_l1(stereo_depth[mask], groundtruth[mask])
-            loss_init = criterion_l2(init_pred[mask], groundtruth[mask]) + criterion_l1(init_pred[mask], groundtruth[mask]) 
-            loss_final = criterion_l2(final_pred[mask], groundtruth[mask]) + criterion_l1(final_pred[mask], groundtruth[mask])
-            loss = 0.6 * loss_final + 0.8 * loss_init + 0.8 * loss_disp #+ 0.3 * edge_aware_smoothness(rgb_left, final_pred)
+            loss_disp = criterion_l1l2(stereo_depth, gt_disp, mask_disp) 
+            loss_init = criterion_l1l2(init_pred, groundtruth, mask)
+            loss_final = criterion_l1l2(init_pred, groundtruth, mask)
+            loss = 0.7 * loss_final + loss_init + 0.8 * loss_disp 
             loss.backward()
 
-            #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=15.0, norm_type=2.0, foreach=None)
             optimizer.step()
 
             reduced_loss = loss.clone()
@@ -324,8 +255,8 @@ def train(args):
 
             epoch_loss += reduced_loss.item()
 
-            #if batch_idx % 200 == 0 and batch_idx != 0:
-            #   metrics_eval = validate(rank, model, val_dataloader, metric_evaluator, args)         
+            if batch_idx % 300 == 0 and batch_idx != 0:
+                metrics_eval = validate(rank, model, val_dataloader, metric_evaluator, args)         
 
             if rank == 0:
                 progress_bar.set_postfix(loss=reduced_loss.item())
@@ -417,19 +348,8 @@ def validate(rank, model, val_loader, metric_evaluator, args):
         for batch_idx, batch_sample in progress_bar:
             rgb_aug, rgb_left, rgb_right, sparse, groundtruth, width = [x.cuda(non_blocking=True) for x in batch_sample]
 
-            if args.model == 'depth_fusion_swin':
-                rgb = input_padding(rgb)
-                stereo = input_padding(stereo)
-                sparse = input_padding(sparse)
-
             stereo_depth, init_pred, final_pred, r_depth, r_disp = model(rgb_aug, rgb_left, rgb_right, sparse, width)
             gt_disp = depth_to_disparity_train(groundtruth, width)
-
-            if args.model == 'depth_fusion_swin':
-                stereo = stereo[:, :, :256, :1216]
-                init_pred = init_pred[:, :, :256, :1216]
-                final_pred = final_pred[:, :, :256, :1216]
-                confidence = confidence[:, :, :256, :1216]
 
             # Evaluate metrics for the current batch
             batch_metrics = metric_evaluator.evaluate_metrics(final_pred, groundtruth) 

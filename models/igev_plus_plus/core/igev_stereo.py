@@ -198,7 +198,7 @@ class IGEVStereo(nn.Module):
 
             disp_feature = self.disp_conv(torch.cat([agg_disp0,agg_disp1, agg_disp2], dim=1))
             selective_weights = torch.sigmoid(self.selective_conv(torch.cat([features_left[0], disp_feature], dim=1)))
-            cnet_list = self.cnet(image1, num_layers=self.args.n_gru_layers)
+            cnet_list = self.cnet(image1, num_layers=self.args.n_gru_layers) #image1
             net_list = [torch.tanh(x[0]) for x in cnet_list]
             inp_list = [torch.relu(x[1]) for x in cnet_list]
             inp_list = [list(conv(i).split(split_size=conv.out_channels//3, dim=1)) for i,conv in zip(inp_list, self.context_zqr_convs)]
@@ -213,6 +213,7 @@ class IGEVStereo(nn.Module):
         # GRUs iterations to update disparity
         for itr in range(iters):
             disp = disp.detach()
+
             geo_feat0, geo_feat1, geo_feat2, init_corr = geo_fn(disp, coords)
             with autocast(device_type="cuda", enabled=self.args.mixed_precision, dtype=getattr(torch, self.args.precision_dtype, torch.float16)):
                 net_list, mask_feat_4, delta_disp = self.update_block(net_list, inp_list, geo_feat0, geo_feat1, geo_feat2, init_corr, selective_weights, disp, iter16=self.args.n_gru_layers==3, iter08=self.args.n_gru_layers>=2)

@@ -3,9 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from functools import partial
 
-from timm.models.layers import DropPath, trunc_normal_
-from models.modules import ConvMixer, CBAM
-from models.modules import PatchEmbedding, SpatialReductionAttention, Mlp
+from timm.models.layers import DropPath, trunc_normal_, to_2tuple
+from models.modules import CBAM
 
 
 class PvtFamily():
@@ -29,7 +28,7 @@ class PvtFamily():
                 "mlp_ratios": [8, 8, 4, 4],
                 "qkv_bias": True,
                 "norm_layer": partial(nn.LayerNorm, eps=1e-6),
-                "depths": [3, 4, 6, 3],
+                "depths": [3, 4, 6, 3], 
                 "sr_ratios": [8, 4, 2, 1],
             },
             "pvt_medium": {
@@ -85,6 +84,94 @@ class PvtFamily():
         )
         return model
 
+class PatchEmbedding(nn.Module):  
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
+        super().__init__()
+        img_size = to_2tuple(img_size)
+        patch_size = to_2tuple(patch_size)
+
+        self.img_size = img_size
+        self.patch_size = patch_size
+
+        #print(embed_dim)
+        # assert img_size[0] % patch_size[0] == 0 and img_size[1] % patch_size[1] == 0, \
+        #     f"img_size {img_size} should be divided by patch_size {patch_size}."
+        self.H, self.W = img_size[0] // patch_size[0], img_size[1] // patch_size[1]
+        self.num_patches = self.H * self.W
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.norm = nn.LayerNorm(embed_dim)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+
+        x = self.proj(x).flatten(2).transpose(1, 2)
+        x = self.norm(x)
+        H, W = H // self.patch_size[0], W // self.patch_size[1]
+
+        #print('Projected embedding', x.shape)
+        return x, (H, W)
+
+class Mlp(nn.Module):
+    def __init__(self, in_features, hidden_features=None, act_layer=nn.GELU, drop=0.):
+        super().__init__()
+
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.act = act_layer()
+        self.fc2 = nn.Linear(hidden_features, in_features)
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x
+
+class SpatialReductionAttention(nn.Module):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., sr_ratio=1):
+        super().__init__()
+        assert dim % num_heads == 0, f"dim {dim} should be divided by num_heads {num_heads}."
+
+        self.dim = dim
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim ** -0.5
+
+        self.q = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        self.sr_ratio = sr_ratio
+        if sr_ratio > 1:
+            self.sr = nn.Conv2d(dim, dim, kernel_size=sr_ratio, stride=sr_ratio)
+            self.norm = nn.LayerNorm(dim)
+
+    def forward(self, x_stereo, x_sparse, H, W):
+        B, N, C = x_sparse.shape
+        q = self.q(x_sparse).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+
+        if self.sr_ratio > 1:
+            x_ = x_stereo.permute(0, 2, 1).reshape(B, C, H, W)
+            x_ = self.sr(x_).reshape(B, C, -1).permute(0, 2, 1)
+            x_ = self.norm(x_)
+            kv = self.kv(x_).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        else:
+            kv = self.kv(x_stereo).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        k, v = kv[0], kv[1]
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+
+        return x
+
 class Block(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, sr_ratio=1):
@@ -101,9 +188,7 @@ class Block(nn.Module):
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
         self.cbam = CBAM(dim)
-        #self.convmixer_layer = ConvMixer(dim, kernel_size=7, depth=2, groups=dim//4)
         self.conv = nn.Conv2d(dim*2, dim, kernel_size=3, padding=1)
-
 
     def forward(self, x_stereo, x_sparse, H, W):
 
@@ -113,7 +198,6 @@ class Block(nn.Module):
         B, L, C = x.shape
         x_reshaped = x.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
 
-        #x_cnn = self.convmixer_layer(x_reshaped)
         x_cbam = self.cbam(x_reshaped)
 
         x = torch.cat([x_reshaped, x_cbam], dim=1)
@@ -215,11 +299,12 @@ class PyramidVisionTransformer(nn.Module):
 
             for blk in block:
                 x_sparse = blk(x_stereo, x_sparse, H, W)
-            
+
             intermediate_features.append(x_sparse.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous())
                 
             x_stereo = x_stereo.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
             x_sparse = x_sparse.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
+
 
         return intermediate_features
 
